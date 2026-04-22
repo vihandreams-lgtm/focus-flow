@@ -1,0 +1,180 @@
+.App {
+  text-align: center;
+}
+
+.App-logo {
+  height: 40vmin;
+  pointer-events: none;
+}
+
+@media (prefers-reduced-motion: no-preference) {
+  .App-logo {
+    animation: App-logo-spin infinite 20s linear;
+  }
+}
+
+.App-header {
+  background-color: #282c34;
+  min-height: 100vh;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  font-size: calc(10px + 2vmin);
+  color: white;
+}
+
+.App-link {
+  color: #61dafb;
+}
+
+@keyframes App-logo-spin {
+  from {
+    transform: rotate(0deg);
+  }
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+
+
+
+
+
+
+
+
+
+
+/* --- THE FLOW PAGE MAGIC --- */
+/* This container holds everything on the Home tab */
+.magic-flow-container {
+  padding: 10px 20px;
+  position: relative;
+  text-align: left; /* Ensures text doesn't inherit the center-align from .App */
+}
+
+/* The Glowing Vertical Timeline Line */
+.magic-flow-container::before {
+  content: '';
+  position: absolute;
+  top: 60px;
+  bottom: 40px;
+  left: 32px;
+  width: 2px;
+  background: linear-gradient(to bottom, 
+    rgba(0, 255, 255, 0) 0%, 
+    rgba(0, 255, 255, 0.4) 20%, 
+    rgba(0, 255, 255, 0.4) 80%, 
+    rgba(0, 255, 255, 0) 100%);
+  z-index: 0;
+}
+
+/* Base style for every card on the Flow page */
+.flow-card-new {
+  position: relative;
+  background: #0a0a0a;
+  border: 1px solid #1a1a1a;
+  border-radius: 20px;
+  padding: 20px;
+  margin-bottom: 20px;
+  margin-left: 35px; /* Pushes card right to show the timeline line */
+  z-index: 1;
+  transition: all 0.4s cubic-bezier(0.175, 0.885, 0.32, 1.275);
+}
+
+/* LIVE CARD: The one with the neon glow and scanline */
+.flow-card-new.live {
+  border: 1px solid #00ffff;
+  box-shadow: 0 0 20px rgba(0, 255, 255, 0.15);
+  background: linear-gradient(145deg, #0a0a0a 0%, #001a1a 100%);
+  transform: scale(1.02); /* Makes it pop slightly */
+}
+
+/* The "Scanline" animation that moves down the Live card */
+.flow-card-new.live::after {
+  content: '';
+  position: absolute;
+  top: 0; left: 0; right: 0; bottom: 0;
+  border-radius: 20px;
+  background: linear-gradient(to bottom, transparent, rgba(0, 255, 255, 0.05), transparent);
+  animation: flow-scan 4s linear infinite;
+  pointer-events: none;
+}
+
+/* PAST CARDS: Dimmed out to focus on the present */
+.flow-card-new.past {
+  opacity: 0.35;
+  filter: grayscale(1);
+}
+
+/* ANIMATIONS */
+@keyframes flow-scan {
+  0% { transform: translateY(-100%); }
+  100% { transform: translateY(100%); }
+}
+
+/* The Status Badge (LIVE, PAST, UPCOMING) */
+.magic-badge {
+  float: right;
+  font-size: 0.6rem;
+  padding: 4px 10px;
+  border-radius: 8px;
+  border: 1px solid #333;
+  text-transform: uppercase;
+  letter-spacing: 1px;
+}
+
+.magic-badge.live {
+  background: #00ffff;
+  color: #000;
+  border: none;
+  font-weight: 900;
+  box-shadow: 0 0 10px #00ffff;
+}
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+/* --- TIMER POWER CORE MAGIC --- */
+.timer-container {
+  position: relative;
+  filter: drop-shadow(0 0 10px rgba(0, 242, 254, 0.2));
+}
+
+/* This makes the neon ring "breathe" when active */
+.timer-active .timer-progress {
+  animation: timer-pulse 2s ease-in-out infinite;
+  stroke-width: 10; /* Slightly thicker when running */
+}
+
+/* The neon liquid effect */
+.timer-progress {
+  stroke-linecap: round;
+  filter: drop-shadow(0 0 8px var(--neon));
+  transition: stroke-dashoffset 1s linear, stroke-width 0.3s ease;
+}
+
+@keyframes timer-pulse {
+  0% { opacity: 1; filter: drop-shadow(0 0 8px var(--neon)); }
+  50% { opacity: 0.7; filter: drop-shadow(0 0 15px var(--neon)); }
+  100% { opacity: 1; filter: drop-shadow(0 0 8px var(--neon)); }
+}
+
+/* Making the numbers pop */
+.timer-val {
+  text-shadow: 0 0 20px rgba(0, 242, 254, 0.4);
+  font-family: 'JetBrains Mono', monospace; /* If you have it, looks very techy */
+  letter-spacing: -2px;
+}
