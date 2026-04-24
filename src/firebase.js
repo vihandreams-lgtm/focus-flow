@@ -1,7 +1,6 @@
-// src/firebase.js
 import { initializeApp } from "firebase/app";
 import { getDatabase } from "firebase/database";
-import { getAuth } from "firebase/auth"; // 1. Import Auth
+import { getAuth } from "firebase/auth";
 
 const firebaseConfig = {
   apiKey: "AIzaSyBLnkfNDo7h4OGCfbAixw8KPNQUQqFK3HM",
@@ -16,6 +15,9 @@ const firebaseConfig = {
 // Initialize Firebase
 const app = initializeApp(firebaseConfig);
 
-// 2. Initialize Realtime Database and Auth
+// Initialize Realtime Database and Auth
 export const db = getDatabase(app);
-export const auth = getAuth(app); // 3. Export Auth so App.js can use it
+export const auth = getAuth(app);
+
+// Note: For the Web SDK of Realtime Database, basic offline 
+// caching is enabled by default for the current session.
