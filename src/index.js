@@ -11,15 +11,19 @@ root.render(
   </React.StrictMode>
 );
 
-// If you want to start measuring performance in your app, pass a function
-// to log results (for example: reportWebVitals(console.log))
-// or send to an analytics endpoint. Learn more: https://bit.ly/CRA-vitals
-reportWebVitals();
-
+// This part registers the service worker to make the app work offline
 if ('serviceWorker' in navigator) {
   window.addEventListener('load', () => {
-    navigator.serviceWorker.register('/sw.js')
-      .then(reg => console.log('FocusFlow Service Worker Registered!'))
-      .catch(err => console.log('Service Worker Error:', err));
+    const swUrl = `${process.env.PUBLIC_URL}/sw.js`;
+    navigator.serviceWorker.register(swUrl)
+      .then(reg => {
+        console.log('FocusFlow PWA: Service Worker Registered Successfully!');
+      })
+      .catch(err => {
+        console.log('FocusFlow PWA: Service Worker Registration Failed:', err);
+      });
   });
 }
+
+// Performance monitoring
+reportWebVitals();
