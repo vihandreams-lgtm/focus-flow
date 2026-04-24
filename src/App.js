@@ -78,7 +78,7 @@ function App() {
   const [customMinutes, setCustomMinutes] = useState(25);
   const [showHistory, setShowHistory] = useState(false);
 
-  // ---------- localStorage helpers (memoised with user) ----------
+  // ---------- localStorage helpers ----------
   const saveToLocal = useCallback((key, data) => {
     if (!user) return;
     try {
@@ -98,13 +98,52 @@ function App() {
     }
   }, [user]);
 
+  // ---------- SMART MERGE FUNCTIONS (wrapped in useCallback for stability) ----------
+  const mergeArrayWithTimestamps = useCallback((remoteData, localData, path) => {
+    const merged = [];
+    const localMap = new Map(localData.map(item => [item.id, item]));
+    const remoteMap = new Map(remoteData.map(item => [item.id, item]));
+
+    const allIds = new Set([...localMap.keys(), ...remoteMap.keys()]);
+    allIds.forEach(id => {
+      const localItem = localMap.get(id);
+      const remoteItem = remoteMap.get(id);
+
+      if (localItem && remoteItem) {
+        const localTime = localItem.lastUpdated || 0;
+        const remoteTime = remoteItem.lastUpdated || 0;
+        if (localTime > remoteTime) {
+          merged.push(localItem);
+          set(ref(db, `users/${user.uid}/${path}`), [...merged.filter(i => i.id !== id), localItem]);
+        } else {
+          merged.push(remoteItem);
+        }
+      } else if (localItem && !remoteItem) {
+        merged.push(localItem);
+        set(ref(db, `users/${user.uid}/${path}`), [...merged.filter(i => i.id !== id), localItem]);
+      } else if (!localItem && remoteItem) {
+        merged.push(remoteItem);
+      }
+    });
+    return merged;
+  }, [user]);
+
+  const mergeObjectWithTimestamp = useCallback((remoteData, localData) => {
+    if (!localData) return remoteData;
+    if (!remoteData) return localData;
+
+    const localTime = localData.lastUpdated || 0;
+    const remoteTime = remoteData.lastUpdated || 0;
+    return localTime > remoteTime ? localData : remoteData;
+  }, []);
+
   // ---------- USER-SPECIFIC FIREBASE SYNC (with localStorage cache) ----------
   useEffect(() => {
     if (!user) return;
 
     const userRef = (path) => ref(db, `users/${user.uid}/${path}`);
 
-    // Pre-load cached data so UI isn't empty while waiting for Firebase
+    // Pre-load cached data
     const cachedTasks = loadFromLocal('tasks');
     if (cachedTasks) setTasks(cachedTasks);
     const cachedLectures = loadFromLocal('lectures');
@@ -130,54 +169,76 @@ function App() {
       setRecentFocusHistory(sorted.slice(0, 3));
     }
 
-    // Set up real listeners that also save to localStorage
+    // Set up real listeners with smart merge
     const unsubTasks = onValue(userRef('tasks'), (snapshot) => {
-      const data = snapshot.val() || [];
-      setTasks(data);
-      saveToLocal('tasks', data);
+      const remote = snapshot.val() || [];
+      const merged = mergeArrayWithTimestamps(remote, tasks, 'tasks');
+      setTasks(merged);
+      saveToLocal('tasks', merged);
     });
     const unsubLectures = onValue(userRef('lectures'), (snapshot) => {
-      const data = snapshot.val() || [];
-      setLectures(data);
-      saveToLocal('lectures', data);
+      const remote = snapshot.val() || [];
+      const merged = mergeArrayWithTimestamps(remote, lectures, 'lectures');
+      setLectures(merged);
+      saveToLocal('lectures', merged);
     });
     const unsubRevisions = onValue(userRef('revisions'), (snapshot) => {
-      const data = snapshot.val() || [];
-      setRevisions(data);
-      saveToLocal('revisions', data);
+      const remote = snapshot.val() || [];
+      const merged = mergeArrayWithTimestamps(remote, revisions, 'revisions');
+      setRevisions(merged);
+      saveToLocal('revisions', merged);
     });
     const unsubExams = onValue(userRef('exams'), (snapshot) => {
-      const data = snapshot.val() || [];
-      setExams(data);
-      saveToLocal('exams', data);
+      const remote = snapshot.val() || [];
+      const merged = mergeArrayWithTimestamps(remote, exams, 'exams');
+      setExams(merged);
+      saveToLocal('exams', merged);
     });
     const unsubCoursework = onValue(userRef('coursework'), (snapshot) => {
-      const data = snapshot.val() || [];
-      setCoursework(data);
-      saveToLocal('coursework', data);
+      const remote = snapshot.val() || [];
+      const merged = mergeArrayWithTimestamps(remote, coursework, 'coursework');
+      setCoursework(merged);
+      saveToLocal('coursework', merged);
     });
     const unsubTimerState = onValue(userRef('timerState'), (snapshot) => {
-      const data = snapshot.val();
-      if (data) setFocusGoal(data.currentFocus || '');
-      else setFocusGoal('');
-      saveToLocal('timerState', data || {});
+      const remote = snapshot.val() || {};
+      const localTimerState = loadFromLocal('timerState') || {};
+      const merged = mergeObjectWithTimestamp(remote, localTimerState);
+      setFocusGoal(merged.currentFocus || '');
+      saveToLocal('timerState', merged);
+      const localTime = localTimerState.lastUpdated || 0;
+      const remoteTime = remote.lastUpdated || 0;
+      if (localTime > remoteTime) {
+        set(ref(db, `users/${user.uid}/timerState`), localTimerState);
+      }
     });
     const unsubStats = onValue(userRef('stats'), (snapshot) => {
-      const data = snapshot.val();
-      if (data) {
-        setSessionsCompleted(data.total || 0);
-        setSessionsToday(data.today || 0);
-        setLastActiveDate(data.lastDate || '');
-        saveToLocal('stats', data);
+      const remote = snapshot.val() || {};
+      const localStats = loadFromLocal('stats') || {};
+      const merged = mergeObjectWithTimestamp(remote, localStats);
+      if (merged) {
+        setSessionsCompleted(merged.total || 0);
+        setSessionsToday(merged.today || 0);
+        setLastActiveDate(merged.lastDate || '');
+        saveToLocal('stats', merged);
+        const localTime = localStats.lastUpdated || 0;
+        const remoteTime = remote.lastUpdated || 0;
+        if (localTime > remoteTime) {
+          set(ref(db, `users/${user.uid}/stats`), localStats);
+        }
       }
     });
     const unsubFocusHistory = onValue(userRef('focusHistory'), (snapshot) => {
-      const data = snapshot.val() || {};
-      const entries = Object.values(data);
-      setFocusHistory(entries);
-      const sorted = entries.sort((a, b) => new Date(b.timestamp) - new Date(a.timestamp));
-      setRecentFocusHistory(sorted.slice(0, 3));
-      saveToLocal('focusHistory', entries);
+      const remote = snapshot.val() || {};
+      const remoteEntries = Object.values(remote);
+      const localHistory = loadFromLocal('focusHistory') || [];
+      const remoteTimestamps = new Set(remoteEntries.map(e => e.timestamp));
+      const newLocal = localHistory.filter(e => !remoteTimestamps.has(e.timestamp));
+      const combined = [...remoteEntries, ...newLocal].sort((a, b) => new Date(b.timestamp) - new Date(a.timestamp));
+      setFocusHistory(combined);
+      saveToLocal('focusHistory', combined);
+      setRecentFocusHistory(combined.slice(0, 3));
+      newLocal.forEach(entry => push(ref(db, `users/${user.uid}/focusHistory`), entry));
     });
 
     return () => {
@@ -190,7 +251,7 @@ function App() {
       unsubStats();
       unsubFocusHistory();
     };
-  }, [user, loadFromLocal, saveToLocal]);
+  }, [user, loadFromLocal, saveToLocal, tasks, lectures, revisions, exams, coursework, mergeArrayWithTimestamps, mergeObjectWithTimestamp]);
 
   // Build subject dropdown options
   useEffect(() => {
@@ -239,57 +300,28 @@ function App() {
   const handleAuthSubmit = async (e) => {
     e.preventDefault();
     setAuthError('');
-
-    if (!authEmail || !authPassword) {
-      setAuthError('Email and password required');
-      return;
-    }
-
+    if (!authEmail || !authPassword) { setAuthError('Email and password required'); return; }
     if (authMode === 'signup') {
-      if (authPassword.length < 8) {
-        setAuthError('Password must be at least 8 characters');
-        return;
-      }
-      if (!/\d/.test(authPassword)) {
-        setAuthError('Password must contain at least one number');
-        return;
-      }
-      if (authPassword !== authConfirmPassword) {
-        setAuthError('Passwords do not match');
-        return;
-      }
+      if (authPassword.length < 8) { setAuthError('Password must be at least 8 characters'); return; }
+      if (!/\d/.test(authPassword)) { setAuthError('Password must contain at least one number'); return; }
+      if (authPassword !== authConfirmPassword) { setAuthError('Passwords do not match'); return; }
     }
-
     try {
-      if (authMode === 'signup') {
-        await createUserWithEmailAndPassword(auth, authEmail, authPassword);
-      } else {
-        await signInWithEmailAndPassword(auth, authEmail, authPassword);
-      }
-    } catch (error) {
-      setAuthError(error.message);
-    }
+      if (authMode === 'signup') await createUserWithEmailAndPassword(auth, authEmail, authPassword);
+      else await signInWithEmailAndPassword(auth, authEmail, authPassword);
+    } catch (error) { setAuthError(error.message); }
   };
 
   const handleLogout = async () => {
-    try {
-      await signOut(auth);
-      setShowProfile(false);
-    } catch (error) {
-      console.error('Logout error:', error);
-    }
+    try { await signOut(auth); setShowProfile(false); } catch (error) { console.error('Logout error:', error); }
   };
 
   const handleDeleteAccount = async () => {
     if (!user) return;
-    const confirmed = window.confirm(
-      '⚠️ PERMANENTLY DELETE YOUR ACCOUNT?\n\nThis will erase all your data: tasks, schedule, focus history, and coursework. This action cannot be undone.'
-    );
+    const confirmed = window.confirm('⚠️ PERMANENTLY DELETE YOUR ACCOUNT?\n\nThis will erase all your data. This action cannot be undone.');
     if (!confirmed) return;
-
     try {
       await remove(ref(db, `users/${user.uid}`));
-      // Clear localStorage for this user
       const keys = Object.keys(localStorage).filter(k => k.startsWith(`focusflow_${user.uid}_`));
       keys.forEach(k => localStorage.removeItem(k));
       await deleteUser(user);
@@ -300,12 +332,11 @@ function App() {
     }
   };
 
-  // --- AI RECOMMENDATION ENGINE (Groq) ---
+  // --- AI RECOMMENDATION ENGINE (Groq) – unchanged ---
   const generateRecommendations = async () => {
     if (!user) return;
     setIsGenerating(true);
     setRecommendations([]);
-
     try {
       const apiKey = process.env.REACT_APP_GROQ_KEY;
       const groq = new OpenAI({
@@ -313,53 +344,29 @@ function App() {
         baseURL: "https://api.groq.com/openai/v1",
         dangerouslyAllowBrowser: true
       });
-
       const currentTime = new Date();
       const currentTimeStr = currentTime.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', hour12: false });
       const todayStr = currentTime.toLocaleDateString();
-
       const todaysSchedule = todaysActivities.map(act => ({
-        subject: act.subject,
-        start: act.startTime,
-        end: act.endTime || act.startTime,
-        category: act.category
+        subject: act.subject, start: act.startTime, end: act.endTime || act.startTime, category: act.category
       }));
-
       const courseworkItems = coursework.map(cw => ({
-        subject: cw.text,
-        deadline: cw.deadline,
-        type: cw.type
+        subject: cw.text, deadline: cw.deadline, type: cw.type
       }));
-
-      const twoWeeksAgo = new Date();
-      twoWeeksAgo.setDate(twoWeeksAgo.getDate() - 14);
+      const twoWeeksAgo = new Date(); twoWeeksAgo.setDate(twoWeeksAgo.getDate() - 14);
       const recentHistory = focusHistory.filter(entry => new Date(entry.timestamp) >= twoWeeksAgo);
-
       const prompt = `
 You are an AI study planner. Based on the following data, create a personalized revision timetable for TODAY.
-
-Current time: ${currentTimeStr} on ${todayStr}.
-Only suggest slots that start AFTER the current time.
-
-Today's existing schedule:
-${JSON.stringify(todaysSchedule, null, 2)}
-
-Coursework and deadlines:
-${JSON.stringify(courseworkItems, null, 2)}
-
-Recent focus history (last 14 days):
-${JSON.stringify(recentHistory, null, 2)}
-
+Current time: ${currentTimeStr} on ${todayStr}. Only suggest slots that start AFTER the current time.
+Today's existing schedule: ${JSON.stringify(todaysSchedule, null, 2)}
+Coursework and deadlines: ${JSON.stringify(courseworkItems, null, 2)}
+Recent focus history (last 14 days): ${JSON.stringify(recentHistory, null, 2)}
 Instructions:
-- Identify free time gaps in the schedule (consider the day ends at 22:00).
-- Prioritize subjects with upcoming deadlines (within 7 days) or those neglected in focus history.
-- Generate 1 to 3 revision sessions (as many as reasonably fit in the free time).
-- Each session must include: subject (string), startTime (HH:MM 24h format), endTime (HH:MM), and a short reasoning (why this session is recommended).
-- Session durations should fit naturally within available free gaps (not fixed).
-- Return ONLY a JSON array of objects with keys: subject, startTime, endTime, reasoning. No additional text.
-Example: [{"subject": "Mathematics", "startTime": "14:00", "endTime": "14:45", "reasoning": "Deadline approaching in 2 days."}]
-`;
-
+- Identify free time gaps (day ends at 22:00).
+- Prioritize subjects with upcoming deadlines (within 7 days) or neglected.
+- Generate 1 to 3 revision sessions.
+- Each session must include: subject, startTime (HH:MM), endTime (HH:MM), reasoning.
+- Return ONLY a JSON array of objects with keys: subject, startTime, endTime, reasoning.`;
       const completion = await groq.chat.completions.create({
         model: "llama-3.3-70b-versatile",
         messages: [
@@ -368,27 +375,17 @@ Example: [{"subject": "Mathematics", "startTime": "14:00", "endTime": "14:45", "
         ],
         temperature: 0.3,
       });
-
       const responseText = completion.choices[0].message.content;
       const jsonMatch = responseText.match(/\[[\s\S]*\]/);
       if (!jsonMatch) throw new Error("Invalid AI response format");
-      
       const parsed = JSON.parse(jsonMatch[0]);
-      
-      const validated = parsed.filter(rec => 
-        rec.subject && rec.startTime && rec.endTime && rec.reasoning
-      ).map((rec, idx) => ({
-        ...rec,
-        id: Date.now() + idx,
-      }));
-
+      const validated = parsed.filter(rec => rec.subject && rec.startTime && rec.endTime && rec.reasoning)
+        .map((rec, idx) => ({ ...rec, id: Date.now() + idx }));
       setRecommendations(validated);
     } catch (error) {
       console.error("AI generation error:", error);
       alert("AI service unavailable. Please try again later.");
-    } finally {
-      setIsGenerating(false);
-    }
+    } finally { setIsGenerating(false); }
   };
 
   const handleAddRecommendation = (rec) => {
@@ -400,8 +397,8 @@ Example: [{"subject": "Mathematics", "startTime": "14:00", "endTime": "14:45", "
       endTime: rec.endTime,
       venue: 'AI Recommended',
       day: todayName,
+      lastUpdated: Date.now()
     };
-    // Optimistic UI update
     const updatedRevisions = [newEntry, ...revisions];
     setRevisions(updatedRevisions);
     saveToLocal('revisions', updatedRevisions);
@@ -410,17 +407,16 @@ Example: [{"subject": "Mathematics", "startTime": "14:00", "endTime": "14:45", "
     setRecommendations(prev => prev.filter(r => r.id !== rec.id));
   };
 
-  const dismissRecommendation = (id) => {
-    setRecommendations(prev => prev.filter(r => r.id !== id));
-  };
+  const dismissRecommendation = (id) => { setRecommendations(prev => prev.filter(r => r.id !== id)); };
 
   // --- FOCUS TIMER LOGIC (with localStorage backup) ---
   useEffect(() => {
     if (!user) return;
     const today = new Date().toLocaleDateString();
     if (lastActiveDate && lastActiveDate !== today) {
-      update(ref(db, `users/${user.uid}/stats`), { today: 0, lastDate: today });
-      saveToLocal('stats', { total: sessionsCompleted, today: 0, lastDate: today });
+      const newStats = { total: sessionsCompleted, today: 0, lastDate: today, lastUpdated: Date.now() };
+      update(ref(db, `users/${user.uid}/stats`), newStats);
+      saveToLocal('stats', newStats);
     }
   }, [lastActiveDate, user, sessionsCompleted, saveToLocal]);
 
@@ -433,22 +429,22 @@ Example: [{"subject": "Mathematics", "startTime": "14:00", "endTime": "14:45", "
       setIsCustomFocus(false);
       setFocusGoal(val);
       if (user) {
-        set(ref(db, `users/${user.uid}/timerState/currentFocus`), val);
-        saveToLocal('timerState', { currentFocus: val });
+        const newTimerState = { currentFocus: val, lastUpdated: Date.now() };
+        set(ref(db, `users/${user.uid}/timerState`), newTimerState);
+        saveToLocal('timerState', newTimerState);
       }
     }
   };
-
   const handleCustomFocusChange = (e) => {
     const val = e.target.value;
     setCustomFocusInput(val);
     setFocusGoal(val);
     if (user) {
-      set(ref(db, `users/${user.uid}/timerState/currentFocus`), val);
-      saveToLocal('timerState', { currentFocus: val });
+      const newTimerState = { currentFocus: val, lastUpdated: Date.now() };
+      set(ref(db, `users/${user.uid}/timerState`), newTimerState);
+      saveToLocal('timerState', newTimerState);
     }
   };
-
   const handleMinutesChange = (e) => {
     const mins = parseInt(e.target.value, 10);
     if (!isNaN(mins) && mins > 0) {
@@ -465,29 +461,29 @@ Example: [{"subject": "Mathematics", "startTime": "14:00", "endTime": "14:45", "
     } else if (seconds === 0 && isActive) {
       setIsActive(false);
       new Audio('https://actions.google.com/sounds/v1/alarms/beep_short.ogg').play().catch(() => {});
-
       if (totalTime === customMinutes * 60 && user) {
         const sessionLog = {
           subjectName: focusGoal || 'Untitled Session',
           duration: customMinutes,
-          timestamp: new Date().toISOString()
+          timestamp: new Date().toISOString(),
+          lastUpdated: Date.now()
         };
         push(ref(db, `users/${user.uid}/focusHistory`), sessionLog);
 
         const newDailyCount = sessionsToday + 1;
         const newTotalCount = sessionsCompleted + 1;
-        set(ref(db, `users/${user.uid}/stats`), {
+        const newStats = {
           total: newTotalCount,
           today: newDailyCount,
-          lastDate: new Date().toLocaleDateString()
-        });
-        saveToLocal('stats', { total: newTotalCount, today: newDailyCount, lastDate: new Date().toLocaleDateString() });
+          lastDate: new Date().toLocaleDateString(),
+          lastUpdated: Date.now()
+        };
+        set(ref(db, `users/${user.uid}/stats`), newStats);
+        saveToLocal('stats', newStats);
 
-        // Also update the local focusHistory cache (optimistic)
         const updatedHistory = [...focusHistory, sessionLog];
         saveToLocal('focusHistory', updatedHistory);
         setRecentFocusHistory(updatedHistory.slice(-3));
-
         if (newDailyCount % 4 === 0) {
           alert("4 Sessions Done! Take a long 15-minute break.");
           setTotalTime(900); setSeconds(900);
@@ -503,13 +499,13 @@ Example: [{"subject": "Mathematics", "startTime": "14:00", "endTime": "14:45", "
         setIsCustomFocus(false);
         setCustomFocusInput('');
         if (user) {
-          set(ref(db, `users/${user.uid}/timerState/currentFocus`), '');
-          saveToLocal('timerState', { currentFocus: '' });
+          const newTimerState = { currentFocus: '', lastUpdated: Date.now() };
+          set(ref(db, `users/${user.uid}/timerState`), newTimerState);
+          saveToLocal('timerState', newTimerState);
         }
       }
     }
     return () => clearInterval(interval);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [isActive, seconds, totalTime, sessionsToday, sessionsCompleted, focusGoal, customMinutes, user, focusHistory, saveToLocal]);
 
   const progressOffset = (2 * Math.PI * 140) - (seconds / totalTime) * (2 * Math.PI * 140);
@@ -525,37 +521,34 @@ Example: [{"subject": "Mathematics", "startTime": "14:00", "endTime": "14:45", "
     return 'UPCOMING';
   };
 
-  // ---------- CRUD OPERATIONS (optimistic + localStorage backup) ----------
+  // ---------- CRUD OPERATIONS (optimistic + localStorage + timestamp) ----------
   const clearForm = () => {
     setSubject(''); setVenue(''); setStartTime(''); setEndTime(''); setDate(''); setDay('Monday'); setEditingId(null);
   };
-
   const saveEntry = () => {
     if (!user || !subject || !startTime) return;
-    const entry = { id: editingId || Date.now(), subject, startTime, endTime, venue, day, date };
+    const entry = {
+      id: editingId || Date.now(),
+      subject, startTime, endTime, venue, day, date,
+      lastUpdated: Date.now()
+    };
     let path = ttTab === 'LECTURES' ? 'lectures' : ttTab === 'REVISION' ? 'revisions' : 'exams';
     let currentList = ttTab === 'LECTURES' ? lectures : ttTab === 'REVISION' ? revisions : exams;
-
     const updatedList = editingId
       ? currentList.map(item => item.id === editingId ? entry : item)
       : [entry, ...currentList];
-
-    // Update local state and localStorage immediately
     if (ttTab === 'LECTURES') setLectures(updatedList);
     else if (ttTab === 'REVISION') setRevisions(updatedList);
     else setExams(updatedList);
     saveToLocal(path, updatedList);
-
     set(ref(db, `users/${user.uid}/${path}`), updatedList);
     clearForm();
   };
-
   const handleEdit = (item) => {
     setEditingId(item.id); setSubject(item.subject); setVenue(item.venue);
     setStartTime(item.startTime); setEndTime(item.endTime); setDay(item.day || 'Monday'); setDate(item.date || '');
     window.scrollTo({ top: 0, behavior: 'smooth' });
   };
-
   const confirmDelete = (id, type) => {
     if (!user || !window.confirm("Are you sure you want to delete this?")) return;
     const paths = { LECTURES: 'lectures', REVISION: 'revisions', EXAMS: 'exams', TASK: 'tasks', CW: 'coursework' };
@@ -563,55 +556,49 @@ Example: [{"subject": "Mathematics", "startTime": "14:00", "endTime": "14:45", "
     const path = paths[type];
     const currentList = lists[type];
     const updatedList = currentList.filter(x => x.id !== id);
-
-    // Update local state and localStorage immediately
     if (type === 'LECTURES') setLectures(updatedList);
     else if (type === 'REVISION') setRevisions(updatedList);
     else if (type === 'EXAMS') setExams(updatedList);
     else if (type === 'TASK') setTasks(updatedList);
     else if (type === 'CW') setCoursework(updatedList);
     saveToLocal(path, updatedList);
-
     set(ref(db, `users/${user.uid}/${path}`), updatedList);
   };
-
   const saveAcademic = () => {
     if(!user || !cwInput) return;
-    const newCw = { id: Date.now(), text: cwInput, type: cwType, deadline: cwDeadline, dueTime: cwDueTime, completed: false };
+    const newCw = {
+      id: Date.now(), text: cwInput, type: cwType, deadline: cwDeadline,
+      dueTime: cwDueTime, completed: false, lastUpdated: Date.now()
+    };
     const updatedCoursework = [newCw, ...coursework];
     setCoursework(updatedCoursework);
     saveToLocal('coursework', updatedCoursework);
     set(ref(db, `users/${user.uid}/coursework`), updatedCoursework);
     setCwInput(''); setCwDeadline(''); setCwDueTime('');
   };
-
   const toggleCw = (id) => {
     if (!user) return;
-    const updated = coursework.map(x => x.id === id ? {...x, completed: !x.completed} : x);
+    const updated = coursework.map(x => x.id === id ? { ...x, completed: !x.completed, lastUpdated: Date.now() } : x);
     setCoursework(updated);
     saveToLocal('coursework', updated);
     set(ref(db, `users/${user.uid}/coursework`), updated);
   };
-
-  // Task addition / completion / clearing (optimistic)
   const addTask = () => {
     if (!user || !taskInput) return;
-    const newTask = { id: Date.now(), text: taskInput, completed: false };
+    const newTask = { id: Date.now(), text: taskInput, completed: false, lastUpdated: Date.now() };
     const updatedTasks = [newTask, ...tasks];
     setTasks(updatedTasks);
     saveToLocal('tasks', updatedTasks);
     set(ref(db, `users/${user.uid}/tasks`), updatedTasks);
     setTaskInput('');
   };
-
   const toggleTask = (id) => {
     if (!user) return;
-    const updated = tasks.map(x => x.id === id ? {...x, completed: !x.completed} : x);
+    const updated = tasks.map(x => x.id === id ? { ...x, completed: !x.completed, lastUpdated: Date.now() } : x);
     setTasks(updated);
     saveToLocal('tasks', updated);
     set(ref(db, `users/${user.uid}/tasks`), updated);
   };
-
   const clearCompletedTasks = () => {
     if (!user) return;
     const updated = tasks.filter(t => !t.completed);
@@ -636,56 +623,23 @@ Example: [{"subject": "Mathematics", "startTime": "14:00", "endTime": "14:45", "
         <div className="auth-card">
           <h1 className="auth-logo">FOCUS FLOW</h1>
           <div className="auth-tabs">
-            <button className={authMode === 'login' ? 'active' : ''} onClick={() => { setAuthMode('login'); setAuthError(''); }}>
-              LOGIN
-            </button>
-            <button className={authMode === 'signup' ? 'active' : ''} onClick={() => { setAuthMode('signup'); setAuthError(''); }}>
-              SIGN UP
-            </button>
+            <button className={authMode === 'login' ? 'active' : ''} onClick={() => { setAuthMode('login'); setAuthError(''); }}>LOGIN</button>
+            <button className={authMode === 'signup' ? 'active' : ''} onClick={() => { setAuthMode('signup'); setAuthError(''); }}>SIGN UP</button>
           </div>
           <form onSubmit={handleAuthSubmit}>
-            <input
-              type="email"
-              placeholder="Email"
-              value={authEmail}
-              onChange={(e) => setAuthEmail(e.target.value)}
-              className="auth-input"
-              autoComplete="email"
-            />
+            <input type="email" placeholder="Email" value={authEmail} onChange={(e) => setAuthEmail(e.target.value)} className="auth-input" autoComplete="email" />
             <div className="password-wrapper">
-              <input
-                type={showPassword ? 'text' : 'password'}
-                placeholder="Password"
-                value={authPassword}
-                onChange={(e) => setAuthPassword(e.target.value)}
-                className="auth-input"
-                autoComplete={authMode === 'signup' ? 'new-password' : 'current-password'}
-              />
-              <button type="button" className="toggle-password" onClick={() => setShowPassword(!showPassword)}>
-                {showPassword ? '🔒' : '👁️'}
-              </button>
+              <input type={showPassword ? 'text' : 'password'} placeholder="Password" value={authPassword} onChange={(e) => setAuthPassword(e.target.value)} className="auth-input" autoComplete={authMode === 'signup' ? 'new-password' : 'current-password'} />
+              <button type="button" className="toggle-password" onClick={() => setShowPassword(!showPassword)}>{showPassword ? '🔒' : '👁️'}</button>
             </div>
             {authMode === 'signup' && (
               <div className="password-wrapper">
-                <input
-                  type={showConfirmPassword ? 'text' : 'password'}
-                  placeholder="Confirm Password"
-                  value={authConfirmPassword}
-                  onChange={(e) => setAuthConfirmPassword(e.target.value)}
-                  className="auth-input"
-                  autoComplete="new-password"
-                />
-                <button type="button" className="toggle-password" onClick={() => setShowConfirmPassword(!showConfirmPassword)}>
-                  {showConfirmPassword ? '🔒' : '👁️'}
-                </button>
+                <input type={showConfirmPassword ? 'text' : 'password'} placeholder="Confirm Password" value={authConfirmPassword} onChange={(e) => setAuthConfirmPassword(e.target.value)} className="auth-input" autoComplete="new-password" />
+                <button type="button" className="toggle-password" onClick={() => setShowConfirmPassword(!showConfirmPassword)}>{showConfirmPassword ? '🔒' : '👁️'}</button>
               </div>
             )}
             {authError && <div className="auth-error">{authError}</div>}
-            <button 
-              type="submit" 
-              className="auth-submit-btn" 
-              disabled={authMode === 'signup' && !isSignupValid()}
-            >
+            <button type="submit" className="auth-submit-btn" disabled={authMode === 'signup' && !isSignupValid()}>
               {authMode === 'signup' ? 'CREATE ACCOUNT' : 'SIGN IN'}
             </button>
           </form>
@@ -697,139 +651,23 @@ Example: [{"subject": "Mathematics", "startTime": "14:00", "endTime": "14:45", "
           </p>
         </div>
         <style>{`
-          .auth-container {
-            min-height: 100vh;
-            display: flex;
-            align-items: center;
-            justify-content: center;
-            background: radial-gradient(circle at 50% 30%, #0a1a1a, #000);
-            padding: 20px;
-          }
-          .auth-card {
-            width: 100%;
-            max-width: 420px;
-            background: rgba(15, 15, 15, 0.75);
-            backdrop-filter: blur(20px);
-            -webkit-backdrop-filter: blur(20px);
-            border: 1px solid rgba(0, 255, 249, 0.3);
-            border-radius: 30px;
-            padding: 40px 30px;
-            box-shadow: 0 0 40px rgba(0, 255, 249, 0.15), inset 0 0 20px rgba(0, 255, 249, 0.05);
-          }
-          .auth-logo {
-            font-size: 2.5rem;
-            font-weight: 900;
-            color: #00fff9;
-            text-align: center;
-            margin-bottom: 30px;
-            letter-spacing: 2px;
-            text-shadow: 0 0 15px #00fff9, 0 0 30px #00fff9;
-          }
-          .auth-tabs {
-            display: flex;
-            gap: 15px;
-            margin-bottom: 30px;
-          }
-          .auth-tabs button {
-            flex: 1;
-            background: transparent;
-            border: 1px solid rgba(0, 255, 249, 0.2);
-            color: #aaa;
-            padding: 14px;
-            border-radius: 12px;
-            font-weight: 700;
-            font-size: 0.9rem;
-            letter-spacing: 1px;
-            cursor: pointer;
-            transition: all 0.2s;
-          }
-          .auth-tabs button.active {
-            background: rgba(0, 255, 249, 0.1);
-            color: #00fff9;
-            border-color: #00fff9;
-            box-shadow: 0 0 15px #00fff9;
-            text-shadow: 0 0 8px #00fff9;
-          }
-          .auth-input {
-            background: rgba(0, 0, 0, 0.4);
-            border: 1px solid rgba(0, 255, 249, 0.3);
-            border-radius: 8px;
-            padding: 15px;
-            color: #fff;
-            width: 100%;
-            box-sizing: border-box;
-            margin-bottom: 15px;
-            font-size: 1rem;
-            transition: all 0.2s ease;
-          }
-          .auth-input:focus {
-            outline: none;
-            border-color: #00fff9;
-            box-shadow: 0 0 10px rgba(0, 255, 249, 0.5);
-          }
-          .auth-input::placeholder {
-            color: rgba(255, 255, 255, 0.5);
-          }
-          .password-wrapper {
-            position: relative;
-          }
-          .toggle-password {
-            position: absolute;
-            right: 15px;
-            top: 50%;
-            transform: translateY(-50%);
-            background: none;
-            border: none;
-            color: #00fff9;
-            font-size: 1.2rem;
-            cursor: pointer;
-            opacity: 0.8;
-            transition: opacity 0.2s;
-          }
-          .toggle-password:hover {
-            opacity: 1;
-          }
-          .auth-submit-btn {
-            width: 100%;
-            background: #00fff9;
-            color: #000;
-            border: none;
-            padding: 16px;
-            border-radius: 14px;
-            font-weight: 900;
-            font-size: 1rem;
-            letter-spacing: 1px;
-            margin-top: 20px;
-            cursor: pointer;
-            box-shadow: 0 0 20px #00fff9;
-            transition: all 0.2s;
-          }
-          .auth-submit-btn:disabled {
-            opacity: 0.5;
-            box-shadow: none;
-            cursor: not-allowed;
-          }
-          .auth-error {
-            color: #ff3a6f;
-            font-size: 0.8rem;
-            margin-top: 10px;
-            text-align: center;
-            text-shadow: 0 0 8px #ff3a6f;
-          }
-          .auth-switch-text {
-            text-align: center;
-            margin-top: 20px;
-            color: #888;
-            font-size: 0.8rem;
-          }
-          .auth-switch-text button {
-            background: none;
-            border: none;
-            color: #00fff9;
-            font-weight: 700;
-            cursor: pointer;
-            text-decoration: underline;
-          }
+          .auth-container { min-height: 100vh; display: flex; align-items: center; justify-content: center; background: radial-gradient(circle at 50% 30%, #0a1a1a, #000); padding: 20px; }
+          .auth-card { width: 100%; max-width: 420px; background: rgba(15, 15, 15, 0.75); backdrop-filter: blur(20px); -webkit-backdrop-filter: blur(20px); border: 1px solid rgba(0, 255, 249, 0.3); border-radius: 30px; padding: 40px 30px; box-shadow: 0 0 40px rgba(0, 255, 249, 0.15), inset 0 0 20px rgba(0, 255, 249, 0.05); }
+          .auth-logo { font-size: 2.5rem; font-weight: 900; color: #00fff9; text-align: center; margin-bottom: 30px; letter-spacing: 2px; text-shadow: 0 0 15px #00fff9, 0 0 30px #00fff9; }
+          .auth-tabs { display: flex; gap: 15px; margin-bottom: 30px; }
+          .auth-tabs button { flex: 1; background: transparent; border: 1px solid rgba(0, 255, 249, 0.2); color: #aaa; padding: 14px; border-radius: 12px; font-weight: 700; font-size: 0.9rem; letter-spacing: 1px; cursor: pointer; transition: all 0.2s; }
+          .auth-tabs button.active { background: rgba(0, 255, 249, 0.1); color: #00fff9; border-color: #00fff9; box-shadow: 0 0 15px #00fff9; text-shadow: 0 0 8px #00fff9; }
+          .auth-input { background: rgba(0, 0, 0, 0.4); border: 1px solid rgba(0, 255, 249, 0.3); border-radius: 8px; padding: 15px; color: #fff; width: 100%; box-sizing: border-box; margin-bottom: 15px; font-size: 1rem; transition: all 0.2s ease; }
+          .auth-input:focus { outline: none; border-color: #00fff9; box-shadow: 0 0 10px rgba(0, 255, 249, 0.5); }
+          .auth-input::placeholder { color: rgba(255, 255, 255, 0.5); }
+          .password-wrapper { position: relative; }
+          .toggle-password { position: absolute; right: 15px; top: 50%; transform: translateY(-50%); background: none; border: none; color: #00fff9; font-size: 1.2rem; cursor: pointer; opacity: 0.8; transition: opacity 0.2s; }
+          .toggle-password:hover { opacity: 1; }
+          .auth-submit-btn { width: 100%; background: #00fff9; color: #000; border: none; padding: 16px; border-radius: 14px; font-weight: 900; font-size: 1rem; letter-spacing: 1px; margin-top: 20px; cursor: pointer; box-shadow: 0 0 20px #00fff9; transition: all 0.2s; }
+          .auth-submit-btn:disabled { opacity: 0.5; box-shadow: none; cursor: not-allowed; }
+          .auth-error { color: #ff3a6f; font-size: 0.8rem; margin-top: 10px; text-align: center; text-shadow: 0 0 8px #ff3a6f; }
+          .auth-switch-text { text-align: center; margin-top: 20px; color: #888; font-size: 0.8rem; }
+          .auth-switch-text button { background: none; border: none; color: #00fff9; font-weight: 700; cursor: pointer; text-decoration: underline; }
         `}</style>
       </div>
     );
@@ -838,19 +676,14 @@ Example: [{"subject": "Mathematics", "startTime": "14:00", "endTime": "14:45", "
   // --- MAIN AUTHENTICATED APP ---
   return (
     <div className="App">
-      {/* Profile Overlay */}
       {showProfile && (
         <div className="profile-overlay" onClick={() => setShowProfile(false)}>
           <div className="profile-modal card-styled" onClick={(e) => e.stopPropagation()}>
             <button className="close-modal" onClick={() => setShowProfile(false)}>✕</button>
             <h3>PROFILE</h3>
             <p className="profile-email">{user.email}</p>
-            <button className="profile-btn logout" onClick={handleLogout}>
-              🚪 SECURE LOGOUT
-            </button>
-            <button className="profile-btn danger" onClick={handleDeleteAccount}>
-              ⚠️ DELETE ACCOUNT
-            </button>
+            <button className="profile-btn logout" onClick={handleLogout}>🚪 SECURE LOGOUT</button>
+            <button className="profile-btn danger" onClick={handleDeleteAccount}>⚠️ DELETE ACCOUNT</button>
           </div>
         </div>
       )}
@@ -1049,43 +882,21 @@ Example: [{"subject": "Mathematics", "startTime": "14:00", "endTime": "14:45", "
                 <div className="focus-input-wrapper">
                   <p className="focus-label">WHAT ARE YOU FOCUSING ON?</p>
                   {!isCustomFocus ? (
-                    <select
-                      className="neon-input focus-input-box"
-                      value={focusGoal}
-                      onChange={handleFocusChange}
-                    >
+                    <select className="neon-input focus-input-box" value={focusGoal} onChange={handleFocusChange}>
                       <option value="">-- Select a subject --</option>
-                      {subjectOptions.map(sub => (
-                        <option key={sub} value={sub}>{sub}</option>
-                      ))}
+                      {subjectOptions.map(sub => <option key={sub} value={sub}>{sub}</option>)}
                       <option value="custom">✏️ Type custom...</option>
                     </select>
                   ) : (
-                    <input
-                      placeholder="Enter custom focus goal"
-                      value={customFocusInput}
-                      onChange={handleCustomFocusChange}
-                      className="neon-input focus-input-box"
-                      autoFocus
-                    />
+                    <input placeholder="Enter custom focus goal" value={customFocusInput} onChange={handleCustomFocusChange} className="neon-input focus-input-box" autoFocus />
                   )}
                 </div>
                 <div className="minutes-input-wrapper">
                   <label className="minutes-label">SESSION LENGTH (MINUTES)</label>
-                  <input
-                    type="number"
-                    min="1"
-                    max="120"
-                    value={customMinutes}
-                    onChange={handleMinutesChange}
-                    className="neon-input minutes-input"
-                    disabled={isActive || seconds < totalTime}
-                  />
+                  <input type="number" min="1" max="120" value={customMinutes} onChange={handleMinutesChange} className="neon-input minutes-input" disabled={isActive || seconds < totalTime} />
                 </div>
               </>
-            ) : (
-              <div style={{height: '110px'}}></div>
-            )}
+            ) : <div style={{height: '110px'}}></div>}
 
             <div className={`timer-container ${isActive ? 'timer-active' : ''}`}>
               <svg className="timer-svg" viewBox="0 0 300 300">
@@ -1148,174 +959,31 @@ Example: [{"subject": "Mathematics", "startTime": "14:00", "endTime": "14:45", "
         body { margin: 0; background: var(--bg); color: #fff; font-family: 'Inter', sans-serif; }
         .App { min-height: 100vh; padding-bottom: 120px; }
         
-        .back-btn {
-          background: transparent;
-          border: 1px solid rgba(255,255,255,0.2);
-          color: #aaa;
-          padding: 8px 16px;
-          border-radius: 20px;
-          font-size: 0.8rem;
-          cursor: pointer;
-          transition: all 0.2s;
-          margin-bottom: 15px;
-          align-self: flex-start;
-        }
-        .back-btn:hover {
-          border-color: var(--neon);
-          color: var(--neon);
-        }
-
-        .ai-intro-card {
-          background: rgba(255,255,255,0.03);
-          border: 1px solid rgba(255,255,255,0.08);
-          border-radius: 20px;
-          padding: 30px 20px;
-          backdrop-filter: blur(8px);
-        }
-        .scanning-animation {
-          padding: 40px 20px;
-          text-align: center;
-        }
-        .pulse-icon {
-          font-size: 3rem;
-          animation: pulse 1.5s infinite;
-        }
-        .shimmer-text {
-          font-size: 1.2rem;
-          font-weight: 700;
-          color: var(--neon);
-          margin: 20px 0 10px;
-          text-transform: uppercase;
-          letter-spacing: 2px;
-        }
-        .progress-bar {
-          width: 80%;
-          height: 4px;
-          background: rgba(255,255,255,0.1);
-          margin: 20px auto;
-          border-radius: 2px;
-          overflow: hidden;
-        }
-        .progress-fill {
-          height: 100%;
-          width: 30%;
-          background: linear-gradient(90deg, transparent, var(--neon), transparent);
-          animation: shimmerMove 1.5s infinite;
-        }
-        @keyframes pulse {
-          0% { opacity: 0.5; transform: scale(1); }
-          50% { opacity: 1; transform: scale(1.1); text-shadow: 0 0 15px var(--neon); }
-          100% { opacity: 0.5; transform: scale(1); }
-        }
-        @keyframes shimmerMove {
-          0% { transform: translateX(-100%); }
-          100% { transform: translateX(400%); }
-        }
-        .recommendations-container {
-          margin-top: 10px;
-        }
-        .recommendation-card {
-          padding: 20px;
-          padding-top: 30px;
-          margin-bottom: 15px;
-          text-align: left;
-          display: flex;
-          flex-direction: column;
-          position: relative;
-        }
-        .neon-card {
-          background: rgba(0, 0, 0, 0.6) !important;
-          border: 2px solid var(--neon) !important;
-          box-shadow: 0 0 20px rgba(0, 255, 249, 0.3), inset 0 0 10px rgba(0, 255, 249, 0.1);
-          backdrop-filter: blur(12px);
-          transition: all 0.3s ease;
-          border-radius: 20px !important;
-        }
-        .neon-card:hover {
-          box-shadow: 0 0 30px var(--neon), inset 0 0 15px rgba(0, 255, 249, 0.2);
-          transform: translateY(-2px);
-        }
-        .rec-remove-btn {
-          position: absolute;
-          top: 10px;
-          right: 10px;
-          background: transparent;
-          border: none;
-          color: #f44;
-          font-size: 1.2rem;
-          cursor: pointer;
-          opacity: 0.6;
-          transition: opacity 0.2s;
-          padding: 5px;
-        }
-        .rec-remove-btn:hover {
-          opacity: 1;
-          color: #ff6666;
-        }
-        .rec-header {
-          display: flex;
-          justify-content: space-between;
-          align-items: baseline;
-          margin-bottom: 10px;
-        }
-        .rec-subject {
-          font-size: 1.3rem;
-          font-weight: 800;
-          color: var(--neon);
-          text-transform: uppercase;
-        }
-        .rec-time {
-          font-size: 0.8rem;
-          font-weight: 700;
-          color: #aaa;
-        }
-        .rec-reasoning {
-          font-size: 0.8rem;
-          color: #ccc;
-          margin-bottom: 15px;
-          line-height: 1.4;
-        }
-        .rec-add-btn {
-          background: transparent;
-          border: 2px solid var(--neon);
-          color: var(--neon);
-          width: 40px;
-          height: 40px;
-          border-radius: 50%;
-          font-size: 1.8rem;
-          font-weight: 300;
-          display: flex;
-          align-items: center;
-          justify-content: center;
-          cursor: pointer;
-          margin-left: auto;
-          transition: all 0.2s;
-        }
-        .rec-add-btn:hover {
-          background: var(--neon);
-          color: #000;
-          box-shadow: 0 0 20px var(--neon);
-        }
-
-        .test-due-badge {
-          display: block;
-          font-size: 0.65rem;
-          color: var(--exam);
-          font-weight: 800;
-          margin-top: 5px;
-        }
-
-        .cat-test .flow-category-tag {
-          background: #e67e22;
-          color: #000;
-        }
-
-        .flow-card-new, .task-card, .card-styled, .manage-item, .form-container {
-          background: rgba(255, 255, 255, 0.03);
-          border: 1px solid rgba(255, 255, 255, 0.08);
-          backdrop-filter: blur(8px);
-          -webkit-backdrop-filter: blur(8px);
-        }
+        .back-btn { background: transparent; border: 1px solid rgba(255,255,255,0.2); color: #aaa; padding: 8px 16px; border-radius: 20px; font-size: 0.8rem; cursor: pointer; transition: all 0.2s; margin-bottom: 15px; align-self: flex-start; }
+        .back-btn:hover { border-color: var(--neon); color: var(--neon); }
+        .ai-intro-card { background: rgba(255,255,255,0.03); border: 1px solid rgba(255,255,255,0.08); border-radius: 20px; padding: 30px 20px; backdrop-filter: blur(8px); }
+        .scanning-animation { padding: 40px 20px; text-align: center; }
+        .pulse-icon { font-size: 3rem; animation: pulse 1.5s infinite; }
+        .shimmer-text { font-size: 1.2rem; font-weight: 700; color: var(--neon); margin: 20px 0 10px; text-transform: uppercase; letter-spacing: 2px; }
+        .progress-bar { width: 80%; height: 4px; background: rgba(255,255,255,0.1); margin: 20px auto; border-radius: 2px; overflow: hidden; }
+        .progress-fill { height: 100%; width: 30%; background: linear-gradient(90deg, transparent, var(--neon), transparent); animation: shimmerMove 1.5s infinite; }
+        @keyframes pulse { 0% { opacity: 0.5; transform: scale(1); } 50% { opacity: 1; transform: scale(1.1); text-shadow: 0 0 15px var(--neon); } 100% { opacity: 0.5; transform: scale(1); } }
+        @keyframes shimmerMove { 0% { transform: translateX(-100%); } 100% { transform: translateX(400%); } }
+        .recommendations-container { margin-top: 10px; }
+        .recommendation-card { padding: 20px; padding-top: 30px; margin-bottom: 15px; text-align: left; display: flex; flex-direction: column; position: relative; }
+        .neon-card { background: rgba(0, 0, 0, 0.6) !important; border: 2px solid var(--neon) !important; box-shadow: 0 0 20px rgba(0, 255, 249, 0.3), inset 0 0 10px rgba(0, 255, 249, 0.1); backdrop-filter: blur(12px); transition: all 0.3s ease; border-radius: 20px !important; }
+        .neon-card:hover { box-shadow: 0 0 30px var(--neon), inset 0 0 15px rgba(0, 255, 249, 0.2); transform: translateY(-2px); }
+        .rec-remove-btn { position: absolute; top: 10px; right: 10px; background: transparent; border: none; color: #f44; font-size: 1.2rem; cursor: pointer; opacity: 0.6; transition: opacity 0.2s; padding: 5px; }
+        .rec-remove-btn:hover { opacity: 1; color: #ff6666; }
+        .rec-header { display: flex; justify-content: space-between; align-items: baseline; margin-bottom: 10px; }
+        .rec-subject { font-size: 1.3rem; font-weight: 800; color: var(--neon); text-transform: uppercase; }
+        .rec-time { font-size: 0.8rem; font-weight: 700; color: #aaa; }
+        .rec-reasoning { font-size: 0.8rem; color: #ccc; margin-bottom: 15px; line-height: 1.4; }
+        .rec-add-btn { background: transparent; border: 2px solid var(--neon); color: var(--neon); width: 40px; height: 40px; border-radius: 50%; font-size: 1.8rem; font-weight: 300; display: flex; align-items: center; justify-content: center; cursor: pointer; margin-left: auto; transition: all 0.2s; }
+        .rec-add-btn:hover { background: var(--neon); color: #000; box-shadow: 0 0 20px var(--neon); }
+        .test-due-badge { display: block; font-size: 0.65rem; color: var(--exam); font-weight: 800; margin-top: 5px; }
+        .cat-test .flow-category-tag { background: #e67e22; color: #000; }
+        .flow-card-new, .task-card, .card-styled, .manage-item, .form-container { background: rgba(255, 255, 255, 0.03); border: 1px solid rgba(255, 255, 255, 0.08); backdrop-filter: blur(8px); -webkit-backdrop-filter: blur(8px); }
         .magic-flow-container { width: 100%; max-width: 400px; margin: 0 auto; padding: 20px; position: relative; box-sizing: border-box; }
         .magic-flow-container::before { content: ''; position: absolute; top: 80px; bottom: 40px; left: 35px; width: 2px; background: linear-gradient(to bottom, rgba(0,255,249,0), var(--neon), rgba(0,255,249,0)); z-index: 0; }
         .flow-card-new { background: rgba(255, 255, 255, 0.03); border: 1px solid rgba(255, 255, 255, 0.08); border-radius: 20px; padding: 20px; margin-bottom: 15px; margin-left: 35px; position: relative; text-align: left; z-index: 1; transition: all 0.3s ease; backdrop-filter: blur(8px); -webkit-backdrop-filter: blur(8px); }
@@ -1330,27 +998,9 @@ Example: [{"subject": "Mathematics", "startTime": "14:00", "endTime": "14:45", "
         .flow-subject { font-size: 1.4rem; font-weight: 800; margin: 5px 0; color: #fff; }
         .flow-time { font-size: 0.85rem; font-weight: 700; color: var(--neon); display: block; }
         .flow-venue { font-size: 0.75rem; color: #888; font-weight: 600; }
-
-        .neon-input {
-          background: rgba(255, 255, 255, 0.05);
-          border: 1px solid rgba(0, 255, 249, 0.3);
-          padding: 15px;
-          border-radius: 12px;
-          color: #fff;
-          width: 100%;
-          box-sizing: border-box;
-          margin-bottom: 15px;
-          backdrop-filter: blur(4px);
-          -webkit-backdrop-filter: blur(4px);
-          transition: all 0.2s ease;
-        }
-        .neon-input:focus {
-          outline: none;
-          border-color: var(--neon);
-          box-shadow: 0 0 15px rgba(0, 255, 249, 0.4);
-        }
+        .neon-input { background: rgba(255, 255, 255, 0.05); border: 1px solid rgba(0, 255, 249, 0.3); padding: 15px; border-radius: 12px; color: #fff; width: 100%; box-sizing: border-box; margin-bottom: 15px; backdrop-filter: blur(4px); -webkit-backdrop-filter: blur(4px); transition: all 0.2s ease; }
+        .neon-input:focus { outline: none; border-color: var(--neon); box-shadow: 0 0 15px rgba(0, 255, 249, 0.4); }
         .neon-input::placeholder { color: rgba(255, 255, 255, 0.3); }
-
         .ai-gen-btn { width: 100%; background: linear-gradient(90deg, #c471ed, #00fff9); border: none; padding: 12px; border-radius: 12px; font-weight: 900; font-size: 0.75rem; margin-bottom: 15px; cursor: pointer; color: #fff; letter-spacing: 1px; }
         .date-picker::-webkit-calendar-picker-indicator, .time-picker::-webkit-calendar-picker-indicator { filter: invert(1); cursor: pointer; }
         .task-card.completed { opacity: 0.3; filter: grayscale(1); }
@@ -1373,15 +1023,12 @@ Example: [{"subject": "Mathematics", "startTime": "14:00", "endTime": "14:45", "
         .action-btn.main { background: var(--neon); color: #000; width: 100%; padding: 18px; border-radius: 14px; font-weight: 900; border: none; margin-top: 10px; cursor: pointer; box-shadow: 0 0 15px var(--neon); }
         .action-btn.edit-mode { background: #fff; color: #000; }
         .cancel-btn { background: none; border: none; color: #f44; width: 100%; margin-top: 10px; font-size: 0.8rem; cursor: pointer; text-decoration: underline; }
-        
         .focus-input-wrapper { margin-top: 20px; margin-bottom: 20px; }
         .focus-label { font-size: 0.65rem; color: #888; font-weight: 900; letter-spacing: 1px; margin-bottom: 10px; text-transform: uppercase; }
         .focus-input-box { text-align: center; font-size: 1.1rem; font-weight: 700; }
-
         .minutes-input-wrapper { margin: 15px 0 10px; text-align: center; }
         .minutes-label { font-size: 0.6rem; color: #888; font-weight: 900; letter-spacing: 1px; text-transform: uppercase; margin-bottom: 5px; display: block; }
         .minutes-input { width: 100px; text-align: center; margin: 0 auto; padding: 10px; font-size: 1.2rem; font-weight: 700; }
-
         .timer-container { position: relative; width: 260px; height: 260px; margin: 20px auto; display: flex; align-items: center; justify-content: center; }
         .timer-svg { position: absolute; transform: rotate(-90deg); width: 100%; height: 100%; }
         .timer-bg { fill: none; stroke: rgba(255, 255, 255, 0.05); stroke-width: 8; }
@@ -1407,112 +1054,28 @@ Example: [{"subject": "Mathematics", "startTime": "14:00", "endTime": "14:45", "
         .add-btn { background: var(--neon); color: #000; width: 60px; border-radius: 12px; font-size: 1.5rem; font-weight: 900; border: none; cursor: pointer; box-shadow: 0 0 10px var(--neon); }
         .input-row { display: flex; gap: 10px; margin-bottom: 25px; }
         .sessions-center-text { color: #888; font-size: 0.8rem; margin-top: 20px; text-align: center; }
-
         .history-toggle-wrapper { margin-top: 25px; text-align: center; }
         .history-toggle-btn { background: transparent; border: 1px solid rgba(255, 255, 255, 0.15); color: #aaa; padding: 6px 16px; border-radius: 20px; font-size: 0.7rem; font-weight: 600; cursor: pointer; backdrop-filter: blur(4px); -webkit-backdrop-filter: blur(4px); transition: all 0.2s ease; }
         .history-toggle-btn:hover { border-color: var(--neon); color: var(--neon); }
-
         .recent-activity-container { margin-top: 10px; }
         .recent-activity-card { display: flex; justify-content: space-between; align-items: center; padding: 12px 15px; margin-bottom: 8px; font-size: 0.85rem; }
         .activity-subject { font-weight: 700; color: #fff; flex: 2; text-align: left; }
         .activity-duration { color: var(--neon); font-weight: 800; flex: 1; }
         .activity-time { color: #666; font-size: 0.7rem; flex: 1; text-align: right; }
-
         .timer-active .timer-progress { animation: timer-glow-pulse 2s ease-in-out infinite; stroke-width: 10; }
         .timer-progress { filter: drop-shadow(0 0 5px var(--neon)); transition: all 0.3s ease; }
-        @keyframes timer-glow-pulse {
-          0% { filter: drop-shadow(0 0 5px var(--neon)); opacity: 1; }
-          50% { filter: drop-shadow(0 0 15px var(--neon)); opacity: 0.8; }
-          100% { filter: drop-shadow(0 0 5px var(--neon)); opacity: 1; }
-        }
-
-        .profile-overlay {
-          position: fixed;
-          top: 0;
-          left: 0;
-          right: 0;
-          bottom: 0;
-          background: rgba(0,0,0,0.8);
-          backdrop-filter: blur(12px);
-          display: flex;
-          align-items: center;
-          justify-content: center;
-          z-index: 200;
-          padding: 20px;
-        }
-        .profile-modal {
-          width: 100%;
-          max-width: 380px;
-          padding: 30px 25px;
-          text-align: center;
-          position: relative;
-          border: 1px solid var(--neon);
-          box-shadow: 0 0 30px rgba(0, 255, 249, 0.3);
-        }
-        .close-modal {
-          position: absolute;
-          top: 15px;
-          right: 15px;
-          background: none;
-          border: none;
-          color: #888;
-          font-size: 1.2rem;
-          cursor: pointer;
-        }
-        .profile-modal h3 {
-          color: var(--neon);
-          margin-bottom: 20px;
-          font-size: 1.4rem;
-          text-shadow: 0 0 10px var(--neon);
-        }
-        .profile-email {
-          color: var(--neon);
-          margin-bottom: 30px;
-          word-break: break-all;
-          font-size: 1rem;
-          text-shadow: 0 0 5px var(--neon);
-        }
-        .profile-btn {
-          width: 100%;
-          background: transparent;
-          border: 1px solid rgba(255,255,255,0.2);
-          color: #fff;
-          padding: 14px;
-          border-radius: 12px;
-          font-weight: 700;
-          margin-bottom: 12px;
-          cursor: pointer;
-          transition: all 0.2s;
-          letter-spacing: 1px;
-        }
-        .profile-btn.logout {
-          border-color: #f44;
-          color: #f44;
-          box-shadow: 0 0 10px rgba(255, 68, 68, 0.3);
-        }
-        .profile-btn.logout:hover {
-          background: #f44;
-          color: #000;
-          box-shadow: 0 0 20px #f44;
-        }
-        .profile-btn.danger {
-          border-color: #ff3a6f;
-          color: #ff3a6f;
-          box-shadow: 0 0 10px rgba(255, 58, 111, 0.3);
-        }
-        .profile-btn.danger:hover {
-          background: #ff3a6f;
-          color: #000;
-          box-shadow: 0 0 20px #ff3a6f;
-        }
-        .auth-loading {
-          min-height: 100vh;
-          display: flex;
-          flex-direction: column;
-          align-items: center;
-          justify-content: center;
-          color: var(--neon);
-        }
+        @keyframes timer-glow-pulse { 0% { filter: drop-shadow(0 0 5px var(--neon)); opacity: 1; } 50% { filter: drop-shadow(0 0 15px var(--neon)); opacity: 0.8; } 100% { filter: drop-shadow(0 0 5px var(--neon)); opacity: 1; } }
+        .profile-overlay { position: fixed; top: 0; left: 0; right: 0; bottom: 0; background: rgba(0,0,0,0.8); backdrop-filter: blur(12px); display: flex; align-items: center; justify-content: center; z-index: 200; padding: 20px; }
+        .profile-modal { width: 100%; max-width: 380px; padding: 30px 25px; text-align: center; position: relative; border: 1px solid var(--neon); box-shadow: 0 0 30px rgba(0, 255, 249, 0.3); }
+        .close-modal { position: absolute; top: 15px; right: 15px; background: none; border: none; color: #888; font-size: 1.2rem; cursor: pointer; }
+        .profile-modal h3 { color: var(--neon); margin-bottom: 20px; font-size: 1.4rem; text-shadow: 0 0 10px var(--neon); }
+        .profile-email { color: var(--neon); margin-bottom: 30px; word-break: break-all; font-size: 1rem; text-shadow: 0 0 5px var(--neon); }
+        .profile-btn { width: 100%; background: transparent; border: 1px solid rgba(255,255,255,0.2); color: #fff; padding: 14px; border-radius: 12px; font-weight: 700; margin-bottom: 12px; cursor: pointer; transition: all 0.2s; letter-spacing: 1px; }
+        .profile-btn.logout { border-color: #f44; color: #f44; box-shadow: 0 0 10px rgba(255, 68, 68, 0.3); }
+        .profile-btn.logout:hover { background: #f44; color: #000; box-shadow: 0 0 20px #f44; }
+        .profile-btn.danger { border-color: #ff3a6f; color: #ff3a6f; box-shadow: 0 0 10px rgba(255, 58, 111, 0.3); }
+        .profile-btn.danger:hover { background: #ff3a6f; color: #000; box-shadow: 0 0 20px #ff3a6f; }
+        .auth-loading { min-height: 100vh; display: flex; flex-direction: column; align-items: center; justify-content: center; color: var(--neon); }
       `}</style>
     </div>
   );
