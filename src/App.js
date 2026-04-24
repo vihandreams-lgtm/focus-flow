@@ -78,7 +78,7 @@ function App() {
   const [customMinutes, setCustomMinutes] = useState(25);
   const [showHistory, setShowHistory] = useState(false);
 
-  // ---------- localStorage helpers ----------
+  // ---------- localStorage helpers (stable) ----------
   const saveToLocal = useCallback((key, data) => {
     if (!user) return;
     try {
@@ -98,8 +98,9 @@ function App() {
     }
   }, [user]);
 
-  // ---------- SMART MERGE FUNCTIONS (wrapped in useCallback for stability) ----------
-  const mergeArrayWithTimestamps = useCallback((remoteData, localData, path) => {
+  // ---------- SMART MERGE FUNCTIONS (now use loadFromLocal directly) ----------
+  const mergeArrayWithTimestamps = useCallback((remoteData, path) => {
+    const localData = loadFromLocal(path) || [];
     const merged = [];
     const localMap = new Map(localData.map(item => [item.id, item]));
     const remoteMap = new Map(remoteData.map(item => [item.id, item]));
@@ -112,32 +113,35 @@ function App() {
       if (localItem && remoteItem) {
         const localTime = localItem.lastUpdated || 0;
         const remoteTime = remoteItem.lastUpdated || 0;
-        if (localTime > remoteTime) {
-          merged.push(localItem);
-          set(ref(db, `users/${user.uid}/${path}`), [...merged.filter(i => i.id !== id), localItem]);
-        } else {
-          merged.push(remoteItem);
-        }
+        merged.push(localTime > remoteTime ? localItem : remoteItem);
       } else if (localItem && !remoteItem) {
         merged.push(localItem);
-        set(ref(db, `users/${user.uid}/${path}`), [...merged.filter(i => i.id !== id), localItem]);
       } else if (!localItem && remoteItem) {
         merged.push(remoteItem);
       }
     });
+    // If merged differs from remote, push the merged data to Firebase
+    if (JSON.stringify(merged) !== JSON.stringify(remoteData)) {
+      set(ref(db, `users/${user.uid}/${path}`), merged);
+    }
     return merged;
-  }, [user]);
+  }, [user, loadFromLocal]);
 
-  const mergeObjectWithTimestamp = useCallback((remoteData, localData) => {
+  const mergeObjectWithTimestamp = useCallback((remoteData, path) => {
+    const localData = loadFromLocal(path);
     if (!localData) return remoteData;
     if (!remoteData) return localData;
 
     const localTime = localData.lastUpdated || 0;
     const remoteTime = remoteData.lastUpdated || 0;
-    return localTime > remoteTime ? localData : remoteData;
-  }, []);
+    if (localTime > remoteTime) {
+      set(ref(db, `users/${user.uid}/${path}`), localData);
+      return localData;
+    }
+    return remoteData;
+  }, [user, loadFromLocal]);
 
-  // ---------- USER-SPECIFIC FIREBASE SYNC (with localStorage cache) ----------
+  // ---------- USER-SPECIFIC FIREBASE SYNC (stable dependencies) ----------
   useEffect(() => {
     if (!user) return;
 
@@ -169,63 +173,51 @@ function App() {
       setRecentFocusHistory(sorted.slice(0, 3));
     }
 
-    // Set up real listeners with smart merge
+    // Set up listeners – they use merge functions that pull local data from storage
     const unsubTasks = onValue(userRef('tasks'), (snapshot) => {
       const remote = snapshot.val() || [];
-      const merged = mergeArrayWithTimestamps(remote, tasks, 'tasks');
+      const merged = mergeArrayWithTimestamps(remote, 'tasks');
       setTasks(merged);
       saveToLocal('tasks', merged);
     });
     const unsubLectures = onValue(userRef('lectures'), (snapshot) => {
       const remote = snapshot.val() || [];
-      const merged = mergeArrayWithTimestamps(remote, lectures, 'lectures');
+      const merged = mergeArrayWithTimestamps(remote, 'lectures');
       setLectures(merged);
       saveToLocal('lectures', merged);
     });
     const unsubRevisions = onValue(userRef('revisions'), (snapshot) => {
       const remote = snapshot.val() || [];
-      const merged = mergeArrayWithTimestamps(remote, revisions, 'revisions');
+      const merged = mergeArrayWithTimestamps(remote, 'revisions');
       setRevisions(merged);
       saveToLocal('revisions', merged);
     });
     const unsubExams = onValue(userRef('exams'), (snapshot) => {
       const remote = snapshot.val() || [];
-      const merged = mergeArrayWithTimestamps(remote, exams, 'exams');
+      const merged = mergeArrayWithTimestamps(remote, 'exams');
       setExams(merged);
       saveToLocal('exams', merged);
     });
     const unsubCoursework = onValue(userRef('coursework'), (snapshot) => {
       const remote = snapshot.val() || [];
-      const merged = mergeArrayWithTimestamps(remote, coursework, 'coursework');
+      const merged = mergeArrayWithTimestamps(remote, 'coursework');
       setCoursework(merged);
       saveToLocal('coursework', merged);
     });
     const unsubTimerState = onValue(userRef('timerState'), (snapshot) => {
       const remote = snapshot.val() || {};
-      const localTimerState = loadFromLocal('timerState') || {};
-      const merged = mergeObjectWithTimestamp(remote, localTimerState);
+      const merged = mergeObjectWithTimestamp(remote, 'timerState');
       setFocusGoal(merged.currentFocus || '');
       saveToLocal('timerState', merged);
-      const localTime = localTimerState.lastUpdated || 0;
-      const remoteTime = remote.lastUpdated || 0;
-      if (localTime > remoteTime) {
-        set(ref(db, `users/${user.uid}/timerState`), localTimerState);
-      }
     });
     const unsubStats = onValue(userRef('stats'), (snapshot) => {
       const remote = snapshot.val() || {};
-      const localStats = loadFromLocal('stats') || {};
-      const merged = mergeObjectWithTimestamp(remote, localStats);
+      const merged = mergeObjectWithTimestamp(remote, 'stats');
       if (merged) {
         setSessionsCompleted(merged.total || 0);
         setSessionsToday(merged.today || 0);
         setLastActiveDate(merged.lastDate || '');
         saveToLocal('stats', merged);
-        const localTime = localStats.lastUpdated || 0;
-        const remoteTime = remote.lastUpdated || 0;
-        if (localTime > remoteTime) {
-          set(ref(db, `users/${user.uid}/stats`), localStats);
-        }
       }
     });
     const unsubFocusHistory = onValue(userRef('focusHistory'), (snapshot) => {
@@ -238,7 +230,7 @@ function App() {
       setFocusHistory(combined);
       saveToLocal('focusHistory', combined);
       setRecentFocusHistory(combined.slice(0, 3));
-      newLocal.forEach(entry => push(ref(db, `users/${user.uid}/focusHistory`), entry));
+      newLocal.forEach(entry => push(userRef('focusHistory'), entry));
     });
 
     return () => {
@@ -251,7 +243,7 @@ function App() {
       unsubStats();
       unsubFocusHistory();
     };
-  }, [user, loadFromLocal, saveToLocal, tasks, lectures, revisions, exams, coursework, mergeArrayWithTimestamps, mergeObjectWithTimestamp]);
+  }, [user, loadFromLocal, saveToLocal, mergeArrayWithTimestamps, mergeObjectWithTimestamp]);
 
   // Build subject dropdown options
   useEffect(() => {
@@ -288,7 +280,7 @@ function App() {
     return [...combined, ...todayTests].sort((a, b) => a.startTime.localeCompare(b.startTime));
   }, [lectures, revisions, exams, coursework, todayName, todayISO]);
 
-  // --- AUTH HANDLERS ---
+  // --- AUTH HANDLERS (unchanged) ---
   const isSignupValid = useCallback(() => {
     if (authMode !== 'signup') return true;
     if (authPassword.length < 8) return false;
@@ -673,7 +665,7 @@ Instructions:
     );
   }
 
-  // --- MAIN AUTHENTICATED APP ---
+  // --- MAIN AUTHENTICATED APP (identical UI) ---
   return (
     <div className="App">
       {showProfile && (
