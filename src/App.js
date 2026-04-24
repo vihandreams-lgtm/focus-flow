@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useMemo } from 'react';
+import React, { useState, useEffect, useMemo, useCallback } from 'react';
 import { db } from './firebase';
 import { 
   getAuth, 
@@ -34,7 +34,7 @@ function App() {
     return unsubscribe;
   }, [auth]);
 
-  // --- APP STATE (only used when authenticated) ---
+  // --- APP STATE ---
   const [currentScreen, setCurrentScreen] = useState('HOME');
   const [ttTab, setTtTab] = useState('LECTURES');
   const [seconds, setSeconds] = useState(1500);
@@ -78,20 +78,89 @@ function App() {
   const [customMinutes, setCustomMinutes] = useState(25);
   const [showHistory, setShowHistory] = useState(false);
 
-  // --- USER-SPECIFIC FIREBASE SYNC ---
+  // ---------- localStorage helpers (memoised with user) ----------
+  const saveToLocal = useCallback((key, data) => {
+    if (!user) return;
+    try {
+      localStorage.setItem(`focusflow_${user.uid}_${key}`, JSON.stringify(data));
+    } catch (e) {
+      console.warn('localStorage save failed', e);
+    }
+  }, [user]);
+
+  const loadFromLocal = useCallback((key) => {
+    if (!user) return null;
+    try {
+      const raw = localStorage.getItem(`focusflow_${user.uid}_${key}`);
+      return raw ? JSON.parse(raw) : null;
+    } catch {
+      return null;
+    }
+  }, [user]);
+
+  // ---------- USER-SPECIFIC FIREBASE SYNC (with localStorage cache) ----------
   useEffect(() => {
     if (!user) return;
 
     const userRef = (path) => ref(db, `users/${user.uid}/${path}`);
 
-    const unsubTasks = onValue(userRef('tasks'), (snapshot) => setTasks(snapshot.val() || []));
-    const unsubLectures = onValue(userRef('lectures'), (snapshot) => setLectures(snapshot.val() || []));
-    const unsubRevisions = onValue(userRef('revisions'), (snapshot) => setRevisions(snapshot.val() || []));
-    const unsubExams = onValue(userRef('exams'), (snapshot) => setExams(snapshot.val() || []));
-    const unsubCoursework = onValue(userRef('coursework'), (snapshot) => setCoursework(snapshot.val() || []));
+    // Pre-load cached data so UI isn't empty while waiting for Firebase
+    const cachedTasks = loadFromLocal('tasks');
+    if (cachedTasks) setTasks(cachedTasks);
+    const cachedLectures = loadFromLocal('lectures');
+    if (cachedLectures) setLectures(cachedLectures);
+    const cachedRevisions = loadFromLocal('revisions');
+    if (cachedRevisions) setRevisions(cachedRevisions);
+    const cachedExams = loadFromLocal('exams');
+    if (cachedExams) setExams(cachedExams);
+    const cachedCoursework = loadFromLocal('coursework');
+    if (cachedCoursework) setCoursework(cachedCoursework);
+    const cachedTimerState = loadFromLocal('timerState');
+    if (cachedTimerState) setFocusGoal(cachedTimerState.currentFocus || '');
+    const cachedStats = loadFromLocal('stats');
+    if (cachedStats) {
+      setSessionsCompleted(cachedStats.total || 0);
+      setSessionsToday(cachedStats.today || 0);
+      setLastActiveDate(cachedStats.lastDate || '');
+    }
+    const cachedFocusHistory = loadFromLocal('focusHistory');
+    if (cachedFocusHistory) {
+      setFocusHistory(cachedFocusHistory);
+      const sorted = cachedFocusHistory.sort((a, b) => new Date(b.timestamp) - new Date(a.timestamp));
+      setRecentFocusHistory(sorted.slice(0, 3));
+    }
+
+    // Set up real listeners that also save to localStorage
+    const unsubTasks = onValue(userRef('tasks'), (snapshot) => {
+      const data = snapshot.val() || [];
+      setTasks(data);
+      saveToLocal('tasks', data);
+    });
+    const unsubLectures = onValue(userRef('lectures'), (snapshot) => {
+      const data = snapshot.val() || [];
+      setLectures(data);
+      saveToLocal('lectures', data);
+    });
+    const unsubRevisions = onValue(userRef('revisions'), (snapshot) => {
+      const data = snapshot.val() || [];
+      setRevisions(data);
+      saveToLocal('revisions', data);
+    });
+    const unsubExams = onValue(userRef('exams'), (snapshot) => {
+      const data = snapshot.val() || [];
+      setExams(data);
+      saveToLocal('exams', data);
+    });
+    const unsubCoursework = onValue(userRef('coursework'), (snapshot) => {
+      const data = snapshot.val() || [];
+      setCoursework(data);
+      saveToLocal('coursework', data);
+    });
     const unsubTimerState = onValue(userRef('timerState'), (snapshot) => {
       const data = snapshot.val();
       if (data) setFocusGoal(data.currentFocus || '');
+      else setFocusGoal('');
+      saveToLocal('timerState', data || {});
     });
     const unsubStats = onValue(userRef('stats'), (snapshot) => {
       const data = snapshot.val();
@@ -99,19 +168,16 @@ function App() {
         setSessionsCompleted(data.total || 0);
         setSessionsToday(data.today || 0);
         setLastActiveDate(data.lastDate || '');
+        saveToLocal('stats', data);
       }
     });
     const unsubFocusHistory = onValue(userRef('focusHistory'), (snapshot) => {
-      const data = snapshot.val();
-      if (data) {
-        const entries = Object.values(data);
-        setFocusHistory(entries);
-        const sorted = entries.sort((a, b) => new Date(b.timestamp) - new Date(a.timestamp));
-        setRecentFocusHistory(sorted.slice(0, 3));
-      } else {
-        setFocusHistory([]);
-        setRecentFocusHistory([]);
-      }
+      const data = snapshot.val() || {};
+      const entries = Object.values(data);
+      setFocusHistory(entries);
+      const sorted = entries.sort((a, b) => new Date(b.timestamp) - new Date(a.timestamp));
+      setRecentFocusHistory(sorted.slice(0, 3));
+      saveToLocal('focusHistory', entries);
     });
 
     return () => {
@@ -124,7 +190,7 @@ function App() {
       unsubStats();
       unsubFocusHistory();
     };
-  }, [user]);
+  }, [user, loadFromLocal, saveToLocal]);
 
   // Build subject dropdown options
   useEffect(() => {
@@ -162,13 +228,13 @@ function App() {
   }, [lectures, revisions, exams, coursework, todayName, todayISO]);
 
   // --- AUTH HANDLERS ---
-  const isSignupValid = () => {
+  const isSignupValid = useCallback(() => {
     if (authMode !== 'signup') return true;
     if (authPassword.length < 8) return false;
     if (!/\d/.test(authPassword)) return false;
     if (authPassword !== authConfirmPassword) return false;
     return true;
-  };
+  }, [authMode, authPassword, authConfirmPassword]);
 
   const handleAuthSubmit = async (e) => {
     e.preventDefault();
@@ -223,6 +289,9 @@ function App() {
 
     try {
       await remove(ref(db, `users/${user.uid}`));
+      // Clear localStorage for this user
+      const keys = Object.keys(localStorage).filter(k => k.startsWith(`focusflow_${user.uid}_`));
+      keys.forEach(k => localStorage.removeItem(k));
       await deleteUser(user);
       setShowProfile(false);
     } catch (error) {
@@ -332,7 +401,11 @@ Example: [{"subject": "Mathematics", "startTime": "14:00", "endTime": "14:45", "
       venue: 'AI Recommended',
       day: todayName,
     };
-    set(ref(db, `users/${user.uid}/revisions`), [newEntry, ...revisions]);
+    // Optimistic UI update
+    const updatedRevisions = [newEntry, ...revisions];
+    setRevisions(updatedRevisions);
+    saveToLocal('revisions', updatedRevisions);
+    set(ref(db, `users/${user.uid}/revisions`), updatedRevisions);
     alert(`Added "${rec.subject}" revision at ${rec.startTime}`);
     setRecommendations(prev => prev.filter(r => r.id !== rec.id));
   };
@@ -341,14 +414,15 @@ Example: [{"subject": "Mathematics", "startTime": "14:00", "endTime": "14:45", "
     setRecommendations(prev => prev.filter(r => r.id !== id));
   };
 
-  // --- FOCUS TIMER LOGIC (with user-specific DB updates) ---
+  // --- FOCUS TIMER LOGIC (with localStorage backup) ---
   useEffect(() => {
     if (!user) return;
     const today = new Date().toLocaleDateString();
     if (lastActiveDate && lastActiveDate !== today) {
       update(ref(db, `users/${user.uid}/stats`), { today: 0, lastDate: today });
+      saveToLocal('stats', { total: sessionsCompleted, today: 0, lastDate: today });
     }
-  }, [lastActiveDate, user]);
+  }, [lastActiveDate, user, sessionsCompleted, saveToLocal]);
 
   const handleFocusChange = (e) => {
     const val = e.target.value;
@@ -358,7 +432,10 @@ Example: [{"subject": "Mathematics", "startTime": "14:00", "endTime": "14:45", "
     } else {
       setIsCustomFocus(false);
       setFocusGoal(val);
-      if (user) set(ref(db, `users/${user.uid}/timerState/currentFocus`), val);
+      if (user) {
+        set(ref(db, `users/${user.uid}/timerState/currentFocus`), val);
+        saveToLocal('timerState', { currentFocus: val });
+      }
     }
   };
 
@@ -366,7 +443,10 @@ Example: [{"subject": "Mathematics", "startTime": "14:00", "endTime": "14:45", "
     const val = e.target.value;
     setCustomFocusInput(val);
     setFocusGoal(val);
-    if (user) set(ref(db, `users/${user.uid}/timerState/currentFocus`), val);
+    if (user) {
+      set(ref(db, `users/${user.uid}/timerState/currentFocus`), val);
+      saveToLocal('timerState', { currentFocus: val });
+    }
   };
 
   const handleMinutesChange = (e) => {
@@ -401,6 +481,12 @@ Example: [{"subject": "Mathematics", "startTime": "14:00", "endTime": "14:45", "
           today: newDailyCount,
           lastDate: new Date().toLocaleDateString()
         });
+        saveToLocal('stats', { total: newTotalCount, today: newDailyCount, lastDate: new Date().toLocaleDateString() });
+
+        // Also update the local focusHistory cache (optimistic)
+        const updatedHistory = [...focusHistory, sessionLog];
+        saveToLocal('focusHistory', updatedHistory);
+        setRecentFocusHistory(updatedHistory.slice(-3));
 
         if (newDailyCount % 4 === 0) {
           alert("4 Sessions Done! Take a long 15-minute break.");
@@ -416,11 +502,15 @@ Example: [{"subject": "Mathematics", "startTime": "14:00", "endTime": "14:45", "
         setFocusGoal('');
         setIsCustomFocus(false);
         setCustomFocusInput('');
-        if (user) set(ref(db, `users/${user.uid}/timerState/currentFocus`), '');
+        if (user) {
+          set(ref(db, `users/${user.uid}/timerState/currentFocus`), '');
+          saveToLocal('timerState', { currentFocus: '' });
+        }
       }
     }
     return () => clearInterval(interval);
-  }, [isActive, seconds, totalTime, sessionsToday, sessionsCompleted, focusGoal, customMinutes, user]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [isActive, seconds, totalTime, sessionsToday, sessionsCompleted, focusGoal, customMinutes, user, focusHistory, saveToLocal]);
 
   const progressOffset = (2 * Math.PI * 140) - (seconds / totalTime) * (2 * Math.PI * 140);
 
@@ -435,7 +525,7 @@ Example: [{"subject": "Mathematics", "startTime": "14:00", "endTime": "14:45", "
     return 'UPCOMING';
   };
 
-  // --- CRUD OPERATIONS (user-specific) ---
+  // ---------- CRUD OPERATIONS (optimistic + localStorage backup) ----------
   const clearForm = () => {
     setSubject(''); setVenue(''); setStartTime(''); setEndTime(''); setDate(''); setDay('Monday'); setEditingId(null);
   };
@@ -445,9 +535,17 @@ Example: [{"subject": "Mathematics", "startTime": "14:00", "endTime": "14:45", "
     const entry = { id: editingId || Date.now(), subject, startTime, endTime, venue, day, date };
     let path = ttTab === 'LECTURES' ? 'lectures' : ttTab === 'REVISION' ? 'revisions' : 'exams';
     let currentList = ttTab === 'LECTURES' ? lectures : ttTab === 'REVISION' ? revisions : exams;
+
     const updatedList = editingId
       ? currentList.map(item => item.id === editingId ? entry : item)
       : [entry, ...currentList];
+
+    // Update local state and localStorage immediately
+    if (ttTab === 'LECTURES') setLectures(updatedList);
+    else if (ttTab === 'REVISION') setRevisions(updatedList);
+    else setExams(updatedList);
+    saveToLocal(path, updatedList);
+
     set(ref(db, `users/${user.uid}/${path}`), updatedList);
     clearForm();
   };
@@ -462,20 +560,64 @@ Example: [{"subject": "Mathematics", "startTime": "14:00", "endTime": "14:45", "
     if (!user || !window.confirm("Are you sure you want to delete this?")) return;
     const paths = { LECTURES: 'lectures', REVISION: 'revisions', EXAMS: 'exams', TASK: 'tasks', CW: 'coursework' };
     const lists = { LECTURES: lectures, REVISION: revisions, EXAMS: exams, TASK: tasks, CW: coursework };
-    set(ref(db, `users/${user.uid}/${paths[type]}`), lists[type].filter(x => x.id !== id));
+    const path = paths[type];
+    const currentList = lists[type];
+    const updatedList = currentList.filter(x => x.id !== id);
+
+    // Update local state and localStorage immediately
+    if (type === 'LECTURES') setLectures(updatedList);
+    else if (type === 'REVISION') setRevisions(updatedList);
+    else if (type === 'EXAMS') setExams(updatedList);
+    else if (type === 'TASK') setTasks(updatedList);
+    else if (type === 'CW') setCoursework(updatedList);
+    saveToLocal(path, updatedList);
+
+    set(ref(db, `users/${user.uid}/${path}`), updatedList);
   };
 
   const saveAcademic = () => {
     if(!user || !cwInput) return;
     const newCw = { id: Date.now(), text: cwInput, type: cwType, deadline: cwDeadline, dueTime: cwDueTime, completed: false };
-    set(ref(db, `users/${user.uid}/coursework`), [newCw, ...coursework]);
+    const updatedCoursework = [newCw, ...coursework];
+    setCoursework(updatedCoursework);
+    saveToLocal('coursework', updatedCoursework);
+    set(ref(db, `users/${user.uid}/coursework`), updatedCoursework);
     setCwInput(''); setCwDeadline(''); setCwDueTime('');
   };
 
   const toggleCw = (id) => {
     if (!user) return;
     const updated = coursework.map(x => x.id === id ? {...x, completed: !x.completed} : x);
+    setCoursework(updated);
+    saveToLocal('coursework', updated);
     set(ref(db, `users/${user.uid}/coursework`), updated);
+  };
+
+  // Task addition / completion / clearing (optimistic)
+  const addTask = () => {
+    if (!user || !taskInput) return;
+    const newTask = { id: Date.now(), text: taskInput, completed: false };
+    const updatedTasks = [newTask, ...tasks];
+    setTasks(updatedTasks);
+    saveToLocal('tasks', updatedTasks);
+    set(ref(db, `users/${user.uid}/tasks`), updatedTasks);
+    setTaskInput('');
+  };
+
+  const toggleTask = (id) => {
+    if (!user) return;
+    const updated = tasks.map(x => x.id === id ? {...x, completed: !x.completed} : x);
+    setTasks(updated);
+    saveToLocal('tasks', updated);
+    set(ref(db, `users/${user.uid}/tasks`), updated);
+  };
+
+  const clearCompletedTasks = () => {
+    if (!user) return;
+    const updated = tasks.filter(t => !t.completed);
+    setTasks(updated);
+    saveToLocal('tasks', updated);
+    set(ref(db, `users/${user.uid}/tasks`), updated);
   };
 
   // --- RENDER AUTH SCREEN OR MAIN APP ---
@@ -882,16 +1024,16 @@ Example: [{"subject": "Mathematics", "startTime": "14:00", "endTime": "14:45", "
           <div className="center-view">
             <h4 className="section-label">DAILY TASKS</h4>
             <div className="input-row">
-              <input placeholder="Add task..." value={taskInput} onChange={e => setTaskInput(e.target.value)} className="neon-input" onKeyPress={(e) => {if(e.key === 'Enter' && taskInput) {set(ref(db, `users/${user.uid}/tasks`), [{id:Date.now(), text:taskInput, completed: false}, ...tasks]); setTaskInput('');}}} />
-              <button className="add-btn" onClick={() => {if(taskInput){set(ref(db, `users/${user.uid}/tasks`), [{id:Date.now(), text:taskInput, completed: false}, ...tasks]); setTaskInput('')}}}>+</button>
+              <input placeholder="Add task..." value={taskInput} onChange={e => setTaskInput(e.target.value)} className="neon-input" onKeyPress={(e) => {if(e.key === 'Enter') addTask();}} />
+              <button className="add-btn" onClick={addTask}>+</button>
             </div>
             {tasks.some(t => t.completed) && (
-              <button className="cancel-btn" style={{marginBottom: '15px', textDecoration: 'none', fontSize: '0.7rem', fontWeight: '800'}} onClick={() => set(ref(db, `users/${user.uid}/tasks`), tasks.filter(t => !t.completed))}>🧹 CLEAR COMPLETED</button>
+              <button className="cancel-btn" style={{marginBottom: '15px', textDecoration: 'none', fontSize: '0.7rem', fontWeight: '800'}} onClick={clearCompletedTasks}>🧹 CLEAR COMPLETED</button>
             )}
             <div className="task-list-container">
               {[...tasks].sort((a,b) => a.completed - b.completed).map(t => (
                 <div key={t.id} className={`task-card card-styled ${t.completed ? 'completed' : ''}`}>
-                  <div className={`check-circle ${t.completed ? 'filled' : ''}`} onClick={() => set(ref(db, `users/${user.uid}/tasks`), tasks.map(x => x.id === t.id ? {...x, completed: !x.completed} : x))}>{t.completed && "✓"}</div>
+                  <div className={`check-circle ${t.completed ? 'filled' : ''}`} onClick={() => toggleTask(t.id)}>{t.completed && "✓"}</div>
                   <span className="task-text">{t.text}</span>
                   <span className="del-icon" onClick={() => confirmDelete(t.id, 'TASK')}>✕</span>
                 </div>
@@ -1006,7 +1148,6 @@ Example: [{"subject": "Mathematics", "startTime": "14:00", "endTime": "14:45", "
         body { margin: 0; background: var(--bg); color: #fff; font-family: 'Inter', sans-serif; }
         .App { min-height: 100vh; padding-bottom: 120px; }
         
-        /* Back button */
         .back-btn {
           background: transparent;
           border: 1px solid rgba(255,255,255,0.2);
@@ -1024,7 +1165,6 @@ Example: [{"subject": "Mathematics", "startTime": "14:00", "endTime": "14:45", "
           color: var(--neon);
         }
 
-        /* AI GENERATION STYLES */
         .ai-intro-card {
           background: rgba(255,255,255,0.03);
           border: 1px solid rgba(255,255,255,0.08);
@@ -1157,7 +1297,6 @@ Example: [{"subject": "Mathematics", "startTime": "14:00", "endTime": "14:45", "
           box-shadow: 0 0 20px var(--neon);
         }
 
-        /* TODAY'S FLOW TEST BADGE */
         .test-due-badge {
           display: block;
           font-size: 0.65rem;
@@ -1166,13 +1305,11 @@ Example: [{"subject": "Mathematics", "startTime": "14:00", "endTime": "14:45", "
           margin-top: 5px;
         }
 
-        /* Test category styling */
         .cat-test .flow-category-tag {
           background: #e67e22;
           color: #000;
         }
 
-        /* Existing styles */
         .flow-card-new, .task-card, .card-styled, .manage-item, .form-container {
           background: rgba(255, 255, 255, 0.03);
           border: 1px solid rgba(255, 255, 255, 0.08);
@@ -1289,7 +1426,6 @@ Example: [{"subject": "Mathematics", "startTime": "14:00", "endTime": "14:45", "
           100% { filter: drop-shadow(0 0 5px var(--neon)); opacity: 1; }
         }
 
-        /* Profile overlay */
         .profile-overlay {
           position: fixed;
           top: 0;
