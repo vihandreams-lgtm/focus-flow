@@ -78,20 +78,28 @@ function App() {
   const [customMinutes, setCustomMinutes] = useState(25);
   const [showHistory, setShowHistory] = useState(false);
 
-  // ========== HEARTBEAT (MOBILE RE-RENDER) ==========
-  const [timeTick, setTimeTick] = useState(0);
+  // ========== LIVE NOW STATE (UPDATES EVERY SECOND) ==========
+  const [now, setNow] = useState(new Date());
 
   useEffect(() => {
     const interval = setInterval(() => {
-      setTimeTick(prev => prev + 1);
-    }, 30000); // every 30 seconds
-
+      setNow(new Date());
+    }, 1000);
     return () => clearInterval(interval);
   }, []);
 
-  // ========== NOTIFICATION SYSTEM ==========
-  const notificationTimeouts = useRef([]);
+  // ========== SERVICE WORKER COMMUNICATION ==========
+  const swRegRef = useRef(null);
 
+  useEffect(() => {
+    if ('serviceWorker' in navigator) {
+      navigator.serviceWorker.ready.then(reg => {
+        swRegRef.current = reg;
+      });
+    }
+  }, []);
+
+  // Audio unlock (still useful for in-app sounds)
   const unlockAudio = useCallback(() => {
     const silent = new Audio('data:audio/wav;base64,UklGRigAAABXQVZFZm10IBIAAAABAAEARKwAAIhYAQACABAAAABkYXRhAgAAAAEA');
     silent.play().then(() => {}).catch(() => {});
@@ -103,6 +111,7 @@ function App() {
     return () => document.removeEventListener('click', unlockAudio);
   }, [unlockAudio]);
 
+  // Request notification permission on login
   const requestNotificationPermission = useCallback(async () => {
     if (typeof Notification !== 'undefined' && Notification.permission === 'default') {
       await Notification.requestPermission();
@@ -112,14 +121,6 @@ function App() {
   useEffect(() => {
     if (user) requestNotificationPermission();
   }, [user, requestNotificationPermission]);
-
-  const notify = useCallback((title, body) => {
-    if (typeof Notification !== 'undefined' && Notification.permission === 'granted') {
-      new Notification(title, { body });
-      const audio = new Audio('https://assets.mixkit.co/active_storage/sfx/2869/2869-preview.mp3');
-      audio.play().catch(() => {});
-    }
-  }, []);
 
   // ---------- localStorage helpers (stable) ----------
   const getStorageKey = (uid, key) => `focusflow_${uid}_${key}`;
@@ -313,47 +314,69 @@ function App() {
     return [...combined, ...todayTests].sort((a, b) => a.startTime.localeCompare(b.startTime));
   }, [lectures, revisions, exams, coursework, todayName, todayISO]);
 
-  // ========== NOTIFICATION SCHEDULER (RESCHEDULES ON HEARTBEAT) ==========
-  useEffect(() => {
-    if (!user) return;
+  // ========== SEND SCHEDULE TO SERVICE WORKER ==========
+  const sendScheduleToSW = useCallback(() => {
+    if (!swRegRef.current || !swRegRef.current.active || !user) return;
 
-    notificationTimeouts.current.forEach(clearTimeout);
-    notificationTimeouts.current = [];
+    const nowTime = new Date();
+    const notifications = [];
 
-    const now = new Date();
-    const scheduleItem = (date, title, body) => {
-      const delay = date.getTime() - Date.now();
-      if (delay > 0) {
-        const id = setTimeout(() => notify(title, body), delay);
-        notificationTimeouts.current.push(id);
-      }
-    };
-
-    // 1. Daily Flow notifications (10 min before and at start)
+    // Daily Flow notifications (10 min before and at start)
     todaysActivities.forEach(act => {
       if (!act.startTime) return;
       const [h, m] = act.startTime.split(':').map(Number);
-      const startDate = new Date(now.getFullYear(), now.getMonth(), now.getDate(), h, m, 0, 0);
+      const startDate = new Date(nowTime.getFullYear(), nowTime.getMonth(), nowTime.getDate(), h, m, 0);
+      
       const preDate = new Date(startDate.getTime() - 10 * 60 * 1000);
-      scheduleItem(preDate, `⏰ ${act.subject} ${act.category}`, `Starting in 10 minutes`);
-      scheduleItem(startDate, `🔔 ${act.subject} ${act.category}`, `Starting now`);
+      notifications.push({
+        id: `act-pre-${act.id}`,
+        title: `⏰ ${act.subject} ${act.category}`,
+        body: `Starting in 10 minutes`,
+        scheduledAt: preDate.toISOString(),
+      });
+      notifications.push({
+        id: `act-start-${act.id}`,
+        title: `🔔 ${act.subject} ${act.category}`,
+        body: `Starting now`,
+        scheduledAt: startDate.toISOString(),
+      });
     });
 
-    // 2. Coursework deadline reminders (2 days and 1 day before)
+    // Coursework deadline reminders (2 days and 1 day before)
     coursework.forEach(cw => {
       if (cw.completed || !cw.deadline) return;
       const deadlineDate = new Date(cw.deadline + 'T09:00:00');
       if (isNaN(deadlineDate.getTime())) return;
+      
       const twoDaysBefore = new Date(deadlineDate);
       twoDaysBefore.setDate(deadlineDate.getDate() - 2);
       const oneDayBefore = new Date(deadlineDate);
       oneDayBefore.setDate(deadlineDate.getDate() - 1);
-      scheduleItem(twoDaysBefore, `📚 Coursework Reminder`, `${cw.text} due in 2 days (${cw.deadline})`);
-      scheduleItem(oneDayBefore, `📚 Coursework Reminder`, `${cw.text} due tomorrow! (${cw.deadline})`);
+      
+      notifications.push({
+        id: `cw-2day-${cw.id}`,
+        title: `📚 Coursework Reminder`,
+        body: `${cw.text} due in 2 days (${cw.deadline})`,
+        scheduledAt: twoDaysBefore.toISOString(),
+      });
+      notifications.push({
+        id: `cw-1day-${cw.id}`,
+        title: `📚 Coursework Reminder`,
+        body: `${cw.text} due tomorrow! (${cw.deadline})`,
+        scheduledAt: oneDayBefore.toISOString(),
+      });
     });
 
-    return () => notificationTimeouts.current.forEach(clearTimeout);
-  }, [todaysActivities, coursework, user, notify, timeTick]); // ← timeTick triggers re‑schedule
+    swRegRef.current.active.postMessage({
+      type: 'SCHEDULE_NOTIFICATIONS',
+      notifications,
+    });
+  }, [todaysActivities, coursework, user]);
+
+  // Send to SW whenever schedule data changes
+  useEffect(() => {
+    sendScheduleToSW();
+  }, [sendScheduleToSW]);
 
   // --- AUTH HANDLERS ---
   const passwordLongEnough = authPassword.length >= 6;
@@ -423,14 +446,14 @@ function App() {
       const twoWeeksAgo = new Date(); twoWeeksAgo.setDate(twoWeeksAgo.getDate() - 14);
       const recentHistory = focusHistory.filter(entry => new Date(entry.timestamp) >= twoWeeksAgo);
       const prompt = `
-You are an AI study planner. Based on the following data, create a personalized revision timetable for TODAY.
+You are an AI study planner. Based on the following data, create a personalised revision timetable for TODAY.
 Current time: ${currentTimeStr} on ${todayStr}. Only suggest slots that start AFTER the current time.
 Today's existing schedule: ${JSON.stringify(todaysSchedule, null, 2)}
 Coursework and deadlines: ${JSON.stringify(courseworkItems, null, 2)}
 Recent focus history (last 14 days): ${JSON.stringify(recentHistory, null, 2)}
 Instructions:
 - Identify free time gaps (day ends at 22:00).
-- Prioritize subjects with upcoming deadlines (within 7 days) or neglected.
+- Prioritise subjects with upcoming deadlines (within 7 days) or neglected.
 - Generate 1 to 3 revision sessions.
 - Each session must include: subject, startTime (HH:MM), endTime (HH:MM), reasoning.
 - Return ONLY a JSON array of objects with keys: subject, startTime, endTime, reasoning.`;
@@ -578,18 +601,21 @@ Instructions:
 
   const progressOffset = (2 * Math.PI * 140) - (seconds / totalTime) * (2 * Math.PI * 140);
 
-  const getStatus = (start, end) => {
-    const now = new Date();
+  // Updated getStatus uses the live `now` state
+  const getStatus = useCallback((start, end) => {
+    const currentTime = now || new Date();
     const [sH, sM] = start.split(':').map(Number);
     const [eH, eM] = end ? end.split(':').map(Number) : [sH + 1, sM];
-    const startDate = new Date(); startDate.setHours(sH, sM, 0);
-    const endDate = new Date(); endDate.setHours(eH, eM, 0);
-    if (now > endDate) return 'PAST';
-    if (now >= startDate && now <= endDate) return 'LIVE';
+    const startDate = new Date(currentTime);
+    startDate.setHours(sH, sM, 0);
+    const endDate = new Date(currentTime);
+    endDate.setHours(eH, eM, 0);
+    if (currentTime > endDate) return 'PAST';
+    if (currentTime >= startDate && currentTime <= endDate) return 'LIVE';
     return 'UPCOMING';
-  };
+  }, [now]);
 
-  // ---------- CRUD OPERATIONS (optimistic + localStorage + timestamp) ----------
+  // ---------- CRUD OPERATIONS ----------
   const clearForm = () => {
     setSubject(''); setVenue(''); setStartTime(''); setEndTime(''); setDate(''); setDay('Monday'); setEditingId(null);
   };
@@ -904,7 +930,7 @@ Instructions:
             {!isGenerating && recommendations.length === 0 && (
               <div className="ai-intro-card">
                 <p style={{color: '#aaa', marginBottom: '20px'}}>
-                  Let AI analyze your schedule, deadlines, and study habits to suggest perfect revision slots for today.
+                  Let AI analyse your schedule, deadlines, and study habits to suggest perfect revision slots for today.
                 </p>
                 <button className="ai-gen-btn" onClick={generateRecommendations}>
                   🚀 GENERATE REVISION TIMETABLE
@@ -919,7 +945,7 @@ Instructions:
                   <div className="progress-fill shimmer"></div>
                 </div>
                 <p style={{color: '#666', fontSize: '0.7rem', marginTop: '15px'}}>
-                  Analyzing free slots, deadlines, and focus history...
+                  Analysing free slots, deadlines, and focus history...
                 </p>
               </div>
             )}
