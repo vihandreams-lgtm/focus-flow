@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useMemo, useCallback } from 'react';
+import React, { useState, useEffect, useMemo, useCallback, useRef } from 'react';
 import { db } from './firebase';
 import { 
   getAuth, 
@@ -78,24 +78,52 @@ function App() {
   const [customMinutes, setCustomMinutes] = useState(25);
   const [showHistory, setShowHistory] = useState(false);
 
+  // ========== NOTIFICATION SYSTEM ==========
+  const notificationTimeouts = useRef([]);
+
+  const unlockAudio = useCallback(() => {
+    const silent = new Audio('data:audio/wav;base64,UklGRigAAABXQVZFZm10IBIAAAABAAEARKwAAIhYAQACABAAAABkYXRhAgAAAAEA');
+    silent.play().then(() => {}).catch(() => {});
+    document.removeEventListener('click', unlockAudio);
+  }, []);
+
+  useEffect(() => {
+    document.addEventListener('click', unlockAudio);
+    return () => document.removeEventListener('click', unlockAudio);
+  }, [unlockAudio]);
+
+  const requestNotificationPermission = useCallback(async () => {
+    if (typeof Notification !== 'undefined' && Notification.permission === 'default') {
+      await Notification.requestPermission();
+    }
+  }, []);
+
+  useEffect(() => {
+    if (user) requestNotificationPermission();
+  }, [user, requestNotificationPermission]);
+
+  const notify = useCallback((title, body) => {
+    if (typeof Notification !== 'undefined' && Notification.permission === 'granted') {
+      new Notification(title, { body });
+      const audio = new Audio('https://assets.mixkit.co/active_storage/sfx/2869/2869-preview.mp3');
+      audio.play().catch(() => {});
+    }
+  }, []);
+
   // ---------- localStorage helpers (stable) ----------
   const getStorageKey = (uid, key) => `focusflow_${uid}_${key}`;
 
   const saveToLocal = useCallback((uid, key, data) => {
     try {
       localStorage.setItem(getStorageKey(uid, key), JSON.stringify(data));
-    } catch (e) {
-      console.warn('localStorage save failed', e);
-    }
+    } catch (e) { console.warn('localStorage save failed', e); }
   }, []);
 
   const loadFromLocal = useCallback((uid, key) => {
     try {
       const raw = localStorage.getItem(getStorageKey(uid, key));
       return raw ? JSON.parse(raw) : null;
-    } catch {
-      return null;
-    }
+    } catch { return null; }
   }, []);
 
   // ---------- SMART MERGE FUNCTIONS (stable) ----------
@@ -137,77 +165,84 @@ function App() {
     return remoteData;
   }, [loadFromLocal]);
 
-  // ---------- USER-SPECIFIC FIREBASE SYNC (runs only once when user changes) ----------
+  // ========== MASTER SYNC ENGINE (NO LOOP) ==========
   useEffect(() => {
     if (!user) return;
 
     const uid = user.uid;
     const userRef = (path) => ref(db, `users/${uid}/${path}`);
 
-    // Pre-load cached data
-    const cachedTasks = loadFromLocal(uid, 'tasks');
-    if (cachedTasks) setTasks(cachedTasks);
-    const cachedLectures = loadFromLocal(uid, 'lectures');
-    if (cachedLectures) setLectures(cachedLectures);
-    const cachedRevisions = loadFromLocal(uid, 'revisions');
-    if (cachedRevisions) setRevisions(cachedRevisions);
-    const cachedExams = loadFromLocal(uid, 'exams');
-    if (cachedExams) setExams(cachedExams);
-    const cachedCoursework = loadFromLocal(uid, 'coursework');
-    if (cachedCoursework) setCoursework(cachedCoursework);
-    const cachedTimerState = loadFromLocal(uid, 'timerState');
-    if (cachedTimerState) setFocusGoal(cachedTimerState.currentFocus || '');
-    const cachedStats = loadFromLocal(uid, 'stats');
-    if (cachedStats) {
-      setSessionsCompleted(cachedStats.total || 0);
-      setSessionsToday(cachedStats.today || 0);
-      setLastActiveDate(cachedStats.lastDate || '');
+    // Pre‑load cached data
+    const preload = (key, setter) => { const d = loadFromLocal(uid, key); if (d) setter(d); };
+    preload('tasks', setTasks);
+    preload('lectures', setLectures);
+    preload('revisions', setRevisions);
+    preload('exams', setExams);
+    preload('coursework', setCoursework);
+    const ts = loadFromLocal(uid, 'timerState');
+    if (ts) setFocusGoal(ts.currentFocus || '');
+    const st = loadFromLocal(uid, 'stats');
+    if (st) {
+      setSessionsCompleted(st.total || 0);
+      setSessionsToday(st.today || 0);
+      setLastActiveDate(st.lastDate || '');
     }
-    const cachedFocusHistory = loadFromLocal(uid, 'focusHistory');
-    if (cachedFocusHistory) {
-      setFocusHistory(cachedFocusHistory);
-      const sorted = cachedFocusHistory.sort((a, b) => new Date(b.timestamp) - new Date(a.timestamp));
+    const fh = loadFromLocal(uid, 'focusHistory');
+    if (fh) {
+      setFocusHistory(fh);
+      const sorted = fh.sort((a, b) => new Date(b.timestamp) - new Date(a.timestamp));
       setRecentFocusHistory(sorted.slice(0, 3));
     }
 
-    const unsubTasks = onValue(userRef('tasks'), (snapshot) => {
-      const remote = snapshot.val() || [];
-      const merged = mergeArrayWithTimestamps(remote, uid, 'tasks');
-      setTasks(merged);
-      saveToLocal(uid, 'tasks', merged);
+    // Subscriptions with functional state updates
+    const unsubTasks = onValue(userRef('tasks'), (snap) => {
+      const remote = snap.val() || [];
+      setTasks(prev => {
+        const merged = mergeArrayWithTimestamps(remote, uid, 'tasks');
+        saveToLocal(uid, 'tasks', merged);
+        return merged;
+      });
     });
-    const unsubLectures = onValue(userRef('lectures'), (snapshot) => {
-      const remote = snapshot.val() || [];
-      const merged = mergeArrayWithTimestamps(remote, uid, 'lectures');
-      setLectures(merged);
-      saveToLocal(uid, 'lectures', merged);
+    const unsubLectures = onValue(userRef('lectures'), (snap) => {
+      const remote = snap.val() || [];
+      setLectures(prev => {
+        const merged = mergeArrayWithTimestamps(remote, uid, 'lectures');
+        saveToLocal(uid, 'lectures', merged);
+        return merged;
+      });
     });
-    const unsubRevisions = onValue(userRef('revisions'), (snapshot) => {
-      const remote = snapshot.val() || [];
-      const merged = mergeArrayWithTimestamps(remote, uid, 'revisions');
-      setRevisions(merged);
-      saveToLocal(uid, 'revisions', merged);
+    const unsubRevisions = onValue(userRef('revisions'), (snap) => {
+      const remote = snap.val() || [];
+      setRevisions(prev => {
+        const merged = mergeArrayWithTimestamps(remote, uid, 'revisions');
+        saveToLocal(uid, 'revisions', merged);
+        return merged;
+      });
     });
-    const unsubExams = onValue(userRef('exams'), (snapshot) => {
-      const remote = snapshot.val() || [];
-      const merged = mergeArrayWithTimestamps(remote, uid, 'exams');
-      setExams(merged);
-      saveToLocal(uid, 'exams', merged);
+    const unsubExams = onValue(userRef('exams'), (snap) => {
+      const remote = snap.val() || [];
+      setExams(prev => {
+        const merged = mergeArrayWithTimestamps(remote, uid, 'exams');
+        saveToLocal(uid, 'exams', merged);
+        return merged;
+      });
     });
-    const unsubCoursework = onValue(userRef('coursework'), (snapshot) => {
-      const remote = snapshot.val() || [];
-      const merged = mergeArrayWithTimestamps(remote, uid, 'coursework');
-      setCoursework(merged);
-      saveToLocal(uid, 'coursework', merged);
+    const unsubCoursework = onValue(userRef('coursework'), (snap) => {
+      const remote = snap.val() || [];
+      setCoursework(prev => {
+        const merged = mergeArrayWithTimestamps(remote, uid, 'coursework');
+        saveToLocal(uid, 'coursework', merged);
+        return merged;
+      });
     });
-    const unsubTimerState = onValue(userRef('timerState'), (snapshot) => {
-      const remote = snapshot.val() || {};
+    const unsubTimerState = onValue(userRef('timerState'), (snap) => {
+      const remote = snap.val() || {};
       const merged = mergeObjectWithTimestamp(remote, uid, 'timerState');
       setFocusGoal(merged.currentFocus || '');
       saveToLocal(uid, 'timerState', merged);
     });
-    const unsubStats = onValue(userRef('stats'), (snapshot) => {
-      const remote = snapshot.val() || {};
+    const unsubStats = onValue(userRef('stats'), (snap) => {
+      const remote = snap.val() || {};
       const merged = mergeObjectWithTimestamp(remote, uid, 'stats');
       if (merged) {
         setSessionsCompleted(merged.total || 0);
@@ -216,8 +251,8 @@ function App() {
         saveToLocal(uid, 'stats', merged);
       }
     });
-    const unsubFocusHistory = onValue(userRef('focusHistory'), (snapshot) => {
-      const remote = snapshot.val() || {};
+    const unsubFocusHistory = onValue(userRef('focusHistory'), (snap) => {
+      const remote = snap.val() || {};
       const remoteEntries = Object.values(remote);
       const localHistory = loadFromLocal(uid, 'focusHistory') || [];
       const remoteTimestamps = new Set(remoteEntries.map(e => e.timestamp));
@@ -239,16 +274,12 @@ function App() {
       unsubStats();
       unsubFocusHistory();
     };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [user]);
+  }, [user, mergeArrayWithTimestamps, mergeObjectWithTimestamp, saveToLocal, loadFromLocal]);
 
   // Build subject options
   useEffect(() => {
-    const lectureSubjects = lectures.map(l => l.subject);
-    const cwSubjects = coursework.map(c => c.text);
-    const allSubjects = [...lectureSubjects, ...cwSubjects].filter(Boolean);
-    const uniqueSubjects = [...new Set(allSubjects)].sort();
-    setSubjectOptions(uniqueSubjects);
+    const subs = [...lectures.map(l => l.subject), ...coursework.map(c => c.text)].filter(Boolean);
+    setSubjectOptions([...new Set(subs)].sort());
   }, [lectures, coursework]);
 
   const todayName = new Intl.DateTimeFormat('en-US', { weekday: 'long' }).format(new Date());
@@ -261,21 +292,57 @@ function App() {
       ...revisions.filter(r => r.day === todayName).map(i => ({...i, category: 'REVISION'})),
       ...exams.filter(e => e.date === todayISO).map(i => ({...i, category: 'EXAM'}))
     ];
-
     const todayTests = coursework
       .filter(cw => cw.type === 'Test' && cw.deadline === todayISO)
       .map(cw => ({
-        id: cw.id,
-        subject: cw.text,
-        startTime: cw.dueTime || '23:59',
-        endTime: cw.dueTime || '23:59',
-        venue: 'Test Deadline',
-        category: 'TEST',
-        dueTime: cw.dueTime,
+        id: cw.id, subject: cw.text,
+        startTime: cw.dueTime || '23:59', endTime: cw.dueTime || '23:59',
+        venue: 'Test Deadline', category: 'TEST', dueTime: cw.dueTime
       }));
-
     return [...combined, ...todayTests].sort((a, b) => a.startTime.localeCompare(b.startTime));
   }, [lectures, revisions, exams, coursework, todayName, todayISO]);
+
+  // ========== NOTIFICATION SCHEDULER ==========
+  useEffect(() => {
+    if (!user) return;
+
+    notificationTimeouts.current.forEach(clearTimeout);
+    notificationTimeouts.current = [];
+
+    const now = new Date();
+    const scheduleItem = (date, title, body) => {
+      const delay = date.getTime() - Date.now();
+      if (delay > 0) {
+        const id = setTimeout(() => notify(title, body), delay);
+        notificationTimeouts.current.push(id);
+      }
+    };
+
+    // 1. Daily Flow notifications (10 min before and at start)
+    todaysActivities.forEach(act => {
+      if (!act.startTime) return;
+      const [h, m] = act.startTime.split(':').map(Number);
+      const startDate = new Date(now.getFullYear(), now.getMonth(), now.getDate(), h, m, 0, 0);
+      const preDate = new Date(startDate.getTime() - 10 * 60 * 1000);
+      scheduleItem(preDate, `⏰ ${act.subject} ${act.category}`, `Starting in 10 minutes`);
+      scheduleItem(startDate, `🔔 ${act.subject} ${act.category}`, `Starting now`);
+    });
+
+    // 2. Coursework deadline reminders (2 days and 1 day before)
+    coursework.forEach(cw => {
+      if (cw.completed || !cw.deadline) return;
+      const deadlineDate = new Date(cw.deadline + 'T09:00:00');
+      if (isNaN(deadlineDate.getTime())) return;
+      const twoDaysBefore = new Date(deadlineDate);
+      twoDaysBefore.setDate(deadlineDate.getDate() - 2);
+      const oneDayBefore = new Date(deadlineDate);
+      oneDayBefore.setDate(deadlineDate.getDate() - 1);
+      scheduleItem(twoDaysBefore, `📚 Coursework Reminder`, `${cw.text} due in 2 days (${cw.deadline})`);
+      scheduleItem(oneDayBefore, `📚 Coursework Reminder`, `${cw.text} due tomorrow! (${cw.deadline})`);
+    });
+
+    return () => notificationTimeouts.current.forEach(clearTimeout);
+  }, [todaysActivities, coursework, user, notify]);
 
   // --- AUTH HANDLERS ---
   const passwordLongEnough = authPassword.length >= 6;
@@ -722,7 +789,7 @@ Instructions:
     );
   }
 
-  // --- MAIN AUTHENTICATED APP ---
+  // --- MAIN AUTHENTICATED APP (unchanged UI) ---
   return (
     <div className="App">
       {showProfile && (
