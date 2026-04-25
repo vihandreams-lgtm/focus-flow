@@ -78,7 +78,7 @@ function App() {
   const [customMinutes, setCustomMinutes] = useState(25);
   const [showHistory, setShowHistory] = useState(false);
 
-  // ---------- localStorage helpers (stable) ----------
+  // ---------- localStorage helpers ----------
   const saveToLocal = useCallback((key, data) => {
     if (!user) return;
     try {
@@ -98,18 +98,16 @@ function App() {
     }
   }, [user]);
 
-  // ---------- SMART MERGE FUNCTIONS (now use loadFromLocal directly) ----------
+  // ---------- SMART MERGE FUNCTIONS (unchanged) ----------
   const mergeArrayWithTimestamps = useCallback((remoteData, path) => {
     const localData = loadFromLocal(path) || [];
     const merged = [];
     const localMap = new Map(localData.map(item => [item.id, item]));
     const remoteMap = new Map(remoteData.map(item => [item.id, item]));
-
     const allIds = new Set([...localMap.keys(), ...remoteMap.keys()]);
     allIds.forEach(id => {
       const localItem = localMap.get(id);
       const remoteItem = remoteMap.get(id);
-
       if (localItem && remoteItem) {
         const localTime = localItem.lastUpdated || 0;
         const remoteTime = remoteItem.lastUpdated || 0;
@@ -120,7 +118,6 @@ function App() {
         merged.push(remoteItem);
       }
     });
-    // If merged differs from remote, push the merged data to Firebase
     if (JSON.stringify(merged) !== JSON.stringify(remoteData)) {
       set(ref(db, `users/${user.uid}/${path}`), merged);
     }
@@ -131,7 +128,6 @@ function App() {
     const localData = loadFromLocal(path);
     if (!localData) return remoteData;
     if (!remoteData) return localData;
-
     const localTime = localData.lastUpdated || 0;
     const remoteTime = remoteData.lastUpdated || 0;
     if (localTime > remoteTime) {
@@ -141,10 +137,9 @@ function App() {
     return remoteData;
   }, [user, loadFromLocal]);
 
-  // ---------- USER-SPECIFIC FIREBASE SYNC (stable dependencies) ----------
+  // ---------- USER-SPECIFIC FIREBASE SYNC ----------
   useEffect(() => {
     if (!user) return;
-
     const userRef = (path) => ref(db, `users/${user.uid}/${path}`);
 
     // Pre-load cached data
@@ -173,7 +168,7 @@ function App() {
       setRecentFocusHistory(sorted.slice(0, 3));
     }
 
-    // Set up listeners – they use merge functions that pull local data from storage
+    // Listeners
     const unsubTasks = onValue(userRef('tasks'), (snapshot) => {
       const remote = snapshot.val() || [];
       const merged = mergeArrayWithTimestamps(remote, 'tasks');
@@ -280,22 +275,22 @@ function App() {
     return [...combined, ...todayTests].sort((a, b) => a.startTime.localeCompare(b.startTime));
   }, [lectures, revisions, exams, coursework, todayName, todayISO]);
 
-  // --- AUTH HANDLERS (unchanged) ---
+  // --- AUTH HANDLERS ---
+  const passwordLongEnough = authPassword.length >= 6;
+  const passwordHasNumber = /\d/.test(authPassword);
+
   const isSignupValid = useCallback(() => {
     if (authMode !== 'signup') return true;
-    if (authPassword.length < 8) return false;
-    if (!/\d/.test(authPassword)) return false;
-    if (authPassword !== authConfirmPassword) return false;
-    return true;
-  }, [authMode, authPassword, authConfirmPassword]);
+    return passwordLongEnough && passwordHasNumber && authPassword === authConfirmPassword;
+  }, [authMode, passwordLongEnough, passwordHasNumber, authPassword, authConfirmPassword]);
 
   const handleAuthSubmit = async (e) => {
     e.preventDefault();
     setAuthError('');
     if (!authEmail || !authPassword) { setAuthError('Email and password required'); return; }
     if (authMode === 'signup') {
-      if (authPassword.length < 8) { setAuthError('Password must be at least 8 characters'); return; }
-      if (!/\d/.test(authPassword)) { setAuthError('Password must contain at least one number'); return; }
+      if (!passwordLongEnough) { setAuthError('Password must be at least 6 characters'); return; }
+      if (!passwordHasNumber) { setAuthError('Password must contain at least one number'); return; }
       if (authPassword !== authConfirmPassword) { setAuthError('Passwords do not match'); return; }
     }
     try {
@@ -625,10 +620,20 @@ Instructions:
               <button type="button" className="toggle-password" onClick={() => setShowPassword(!showPassword)}>{showPassword ? '🔒' : '👁️'}</button>
             </div>
             {authMode === 'signup' && (
-              <div className="password-wrapper">
-                <input type={showConfirmPassword ? 'text' : 'password'} placeholder="Confirm Password" value={authConfirmPassword} onChange={(e) => setAuthConfirmPassword(e.target.value)} className="auth-input" autoComplete="new-password" />
-                <button type="button" className="toggle-password" onClick={() => setShowConfirmPassword(!showConfirmPassword)}>{showConfirmPassword ? '🔒' : '👁️'}</button>
-              </div>
+              <>
+                <div className="password-checklist">
+                  <p style={{ color: passwordLongEnough ? '#00fff9' : '#555' }}>
+                    {passwordLongEnough ? '✓' : '○'} At least 6 characters
+                  </p>
+                  <p style={{ color: passwordHasNumber ? '#00fff9' : '#555' }}>
+                    {passwordHasNumber ? '✓' : '○'} At least one number
+                  </p>
+                </div>
+                <div className="password-wrapper">
+                  <input type={showConfirmPassword ? 'text' : 'password'} placeholder="Confirm Password" value={authConfirmPassword} onChange={(e) => setAuthConfirmPassword(e.target.value)} className="auth-input" autoComplete="new-password" />
+                  <button type="button" className="toggle-password" onClick={() => setShowConfirmPassword(!showConfirmPassword)}>{showConfirmPassword ? '🔒' : '👁️'}</button>
+                </div>
+              </>
             )}
             {authError && <div className="auth-error">{authError}</div>}
             <button type="submit" className="auth-submit-btn" disabled={authMode === 'signup' && !isSignupValid()}>
@@ -655,6 +660,8 @@ Instructions:
           .password-wrapper { position: relative; }
           .toggle-password { position: absolute; right: 15px; top: 50%; transform: translateY(-50%); background: none; border: none; color: #00fff9; font-size: 1.2rem; cursor: pointer; opacity: 0.8; transition: opacity 0.2s; }
           .toggle-password:hover { opacity: 1; }
+          .password-checklist { margin: -5px 0 10px 0; font-size: 0.8rem; text-align: left; padding-left: 5px; }
+          .password-checklist p { margin: 4px 0; transition: color 0.2s; }
           .auth-submit-btn { width: 100%; background: #00fff9; color: #000; border: none; padding: 16px; border-radius: 14px; font-weight: 900; font-size: 1rem; letter-spacing: 1px; margin-top: 20px; cursor: pointer; box-shadow: 0 0 20px #00fff9; transition: all 0.2s; }
           .auth-submit-btn:disabled { opacity: 0.5; box-shadow: none; cursor: not-allowed; }
           .auth-error { color: #ff3a6f; font-size: 0.8rem; margin-top: 10px; text-align: center; text-shadow: 0 0 8px #ff3a6f; }
@@ -665,7 +672,7 @@ Instructions:
     );
   }
 
-  // --- MAIN AUTHENTICATED APP (identical UI) ---
+  // --- MAIN AUTHENTICATED APP (updated labels) ---
   return (
     <div className="App">
       {showProfile && (
@@ -809,7 +816,7 @@ Instructions:
 
         {currentScreen === 'ACADEMIC' && (
           <div className="center-view">
-            <h4 className="section-label">ACADEMIC / COURSEWORK</h4>
+            <h4 className="section-label">COURSEWORK</h4>
             <div className="form-container" style={{marginBottom: '25px'}}>
               <div className="input-group">
                 <label>TYPE</label>
@@ -940,8 +947,8 @@ Instructions:
 
       <nav className="nav-bar">
         <button onClick={() => setCurrentScreen('HOME')} className={currentScreen === 'HOME' ? 'active' : ''}>🏠<span>Home</span></button>
-        <button onClick={() => setCurrentScreen('TIMETABLE')} className={currentScreen === 'TIMETABLE' || currentScreen === 'AI_GEN' ? 'active' : ''}>📅<span>Schedule</span></button>
-        <button onClick={() => setCurrentScreen('ACADEMIC')} className={currentScreen === 'ACADEMIC' ? 'active' : ''}>📄<span>Academic</span></button>
+        <button onClick={() => setCurrentScreen('TIMETABLE')} className={currentScreen === 'TIMETABLE' || currentScreen === 'AI_GEN' ? 'active' : ''}>📅<span>Timetables</span></button>
+        <button onClick={() => setCurrentScreen('ACADEMIC')} className={currentScreen === 'ACADEMIC' ? 'active' : ''}>📄<span>Coursework</span></button>
         <button onClick={() => setCurrentScreen('TASKS')} className={currentScreen === 'TASKS' ? 'active' : ''}>✅<span>Tasks</span></button>
         <button onClick={() => setCurrentScreen('FOCUS')} className={currentScreen === 'FOCUS' ? 'active' : ''}>⏱️<span>Focus</span></button>
       </nav>
