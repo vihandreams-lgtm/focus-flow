@@ -78,29 +78,29 @@ function App() {
   const [customMinutes, setCustomMinutes] = useState(25);
   const [showHistory, setShowHistory] = useState(false);
 
-  // ---------- localStorage helpers ----------
-  const saveToLocal = useCallback((key, data) => {
-    if (!user) return;
+  // ---------- localStorage helpers (stable) ----------
+  const getStorageKey = (uid, key) => `focusflow_${uid}_${key}`;
+
+  const saveToLocal = useCallback((uid, key, data) => {
     try {
-      localStorage.setItem(`focusflow_${user.uid}_${key}`, JSON.stringify(data));
+      localStorage.setItem(getStorageKey(uid, key), JSON.stringify(data));
     } catch (e) {
       console.warn('localStorage save failed', e);
     }
-  }, [user]);
+  }, []);
 
-  const loadFromLocal = useCallback((key) => {
-    if (!user) return null;
+  const loadFromLocal = useCallback((uid, key) => {
     try {
-      const raw = localStorage.getItem(`focusflow_${user.uid}_${key}`);
+      const raw = localStorage.getItem(getStorageKey(uid, key));
       return raw ? JSON.parse(raw) : null;
     } catch {
       return null;
     }
-  }, [user]);
+  }, []);
 
-  // ---------- SMART MERGE FUNCTIONS (unchanged) ----------
-  const mergeArrayWithTimestamps = useCallback((remoteData, path) => {
-    const localData = loadFromLocal(path) || [];
+  // ---------- SMART MERGE FUNCTIONS (stable) ----------
+  const mergeArrayWithTimestamps = useCallback((remoteData, uid, path) => {
+    const localData = loadFromLocal(uid, path) || [];
     const merged = [];
     const localMap = new Map(localData.map(item => [item.id, item]));
     const remoteMap = new Map(remoteData.map(item => [item.id, item]));
@@ -119,111 +119,112 @@ function App() {
       }
     });
     if (JSON.stringify(merged) !== JSON.stringify(remoteData)) {
-      set(ref(db, `users/${user.uid}/${path}`), merged);
+      set(ref(db, `users/${uid}/${path}`), merged);
     }
     return merged;
-  }, [user, loadFromLocal]);
+  }, [loadFromLocal]);
 
-  const mergeObjectWithTimestamp = useCallback((remoteData, path) => {
-    const localData = loadFromLocal(path);
+  const mergeObjectWithTimestamp = useCallback((remoteData, uid, path) => {
+    const localData = loadFromLocal(uid, path);
     if (!localData) return remoteData;
     if (!remoteData) return localData;
     const localTime = localData.lastUpdated || 0;
     const remoteTime = remoteData.lastUpdated || 0;
     if (localTime > remoteTime) {
-      set(ref(db, `users/${user.uid}/${path}`), localData);
+      set(ref(db, `users/${uid}/${path}`), localData);
       return localData;
     }
     return remoteData;
-  }, [user, loadFromLocal]);
+  }, [loadFromLocal]);
 
-  // ---------- USER-SPECIFIC FIREBASE SYNC ----------
+  // ---------- USER-SPECIFIC FIREBASE SYNC (runs only once when user changes) ----------
   useEffect(() => {
     if (!user) return;
-    const userRef = (path) => ref(db, `users/${user.uid}/${path}`);
+
+    const uid = user.uid;
+    const userRef = (path) => ref(db, `users/${uid}/${path}`);
 
     // Pre-load cached data
-    const cachedTasks = loadFromLocal('tasks');
+    const cachedTasks = loadFromLocal(uid, 'tasks');
     if (cachedTasks) setTasks(cachedTasks);
-    const cachedLectures = loadFromLocal('lectures');
+    const cachedLectures = loadFromLocal(uid, 'lectures');
     if (cachedLectures) setLectures(cachedLectures);
-    const cachedRevisions = loadFromLocal('revisions');
+    const cachedRevisions = loadFromLocal(uid, 'revisions');
     if (cachedRevisions) setRevisions(cachedRevisions);
-    const cachedExams = loadFromLocal('exams');
+    const cachedExams = loadFromLocal(uid, 'exams');
     if (cachedExams) setExams(cachedExams);
-    const cachedCoursework = loadFromLocal('coursework');
+    const cachedCoursework = loadFromLocal(uid, 'coursework');
     if (cachedCoursework) setCoursework(cachedCoursework);
-    const cachedTimerState = loadFromLocal('timerState');
+    const cachedTimerState = loadFromLocal(uid, 'timerState');
     if (cachedTimerState) setFocusGoal(cachedTimerState.currentFocus || '');
-    const cachedStats = loadFromLocal('stats');
+    const cachedStats = loadFromLocal(uid, 'stats');
     if (cachedStats) {
       setSessionsCompleted(cachedStats.total || 0);
       setSessionsToday(cachedStats.today || 0);
       setLastActiveDate(cachedStats.lastDate || '');
     }
-    const cachedFocusHistory = loadFromLocal('focusHistory');
+    const cachedFocusHistory = loadFromLocal(uid, 'focusHistory');
     if (cachedFocusHistory) {
       setFocusHistory(cachedFocusHistory);
       const sorted = cachedFocusHistory.sort((a, b) => new Date(b.timestamp) - new Date(a.timestamp));
       setRecentFocusHistory(sorted.slice(0, 3));
     }
 
-    // Listeners
     const unsubTasks = onValue(userRef('tasks'), (snapshot) => {
       const remote = snapshot.val() || [];
-      const merged = mergeArrayWithTimestamps(remote, 'tasks');
+      const merged = mergeArrayWithTimestamps(remote, uid, 'tasks');
       setTasks(merged);
-      saveToLocal('tasks', merged);
+      saveToLocal(uid, 'tasks', merged);
     });
     const unsubLectures = onValue(userRef('lectures'), (snapshot) => {
       const remote = snapshot.val() || [];
-      const merged = mergeArrayWithTimestamps(remote, 'lectures');
+      const merged = mergeArrayWithTimestamps(remote, uid, 'lectures');
       setLectures(merged);
-      saveToLocal('lectures', merged);
+      saveToLocal(uid, 'lectures', merged);
     });
     const unsubRevisions = onValue(userRef('revisions'), (snapshot) => {
       const remote = snapshot.val() || [];
-      const merged = mergeArrayWithTimestamps(remote, 'revisions');
+      const merged = mergeArrayWithTimestamps(remote, uid, 'revisions');
       setRevisions(merged);
-      saveToLocal('revisions', merged);
+      saveToLocal(uid, 'revisions', merged);
     });
     const unsubExams = onValue(userRef('exams'), (snapshot) => {
       const remote = snapshot.val() || [];
-      const merged = mergeArrayWithTimestamps(remote, 'exams');
+      const merged = mergeArrayWithTimestamps(remote, uid, 'exams');
       setExams(merged);
-      saveToLocal('exams', merged);
+      saveToLocal(uid, 'exams', merged);
     });
     const unsubCoursework = onValue(userRef('coursework'), (snapshot) => {
       const remote = snapshot.val() || [];
-      const merged = mergeArrayWithTimestamps(remote, 'coursework');
+      const merged = mergeArrayWithTimestamps(remote, uid, 'coursework');
       setCoursework(merged);
-      saveToLocal('coursework', merged);
+      saveToLocal(uid, 'coursework', merged);
     });
     const unsubTimerState = onValue(userRef('timerState'), (snapshot) => {
       const remote = snapshot.val() || {};
-      const merged = mergeObjectWithTimestamp(remote, 'timerState');
+      const merged = mergeObjectWithTimestamp(remote, uid, 'timerState');
       setFocusGoal(merged.currentFocus || '');
-      saveToLocal('timerState', merged);
+      saveToLocal(uid, 'timerState', merged);
     });
     const unsubStats = onValue(userRef('stats'), (snapshot) => {
       const remote = snapshot.val() || {};
-      const merged = mergeObjectWithTimestamp(remote, 'stats');
+      const merged = mergeObjectWithTimestamp(remote, uid, 'stats');
       if (merged) {
         setSessionsCompleted(merged.total || 0);
         setSessionsToday(merged.today || 0);
         setLastActiveDate(merged.lastDate || '');
-        saveToLocal('stats', merged);
+        saveToLocal(uid, 'stats', merged);
       }
     });
     const unsubFocusHistory = onValue(userRef('focusHistory'), (snapshot) => {
       const remote = snapshot.val() || {};
       const remoteEntries = Object.values(remote);
-      const localHistory = loadFromLocal('focusHistory') || [];
+      const localHistory = loadFromLocal(uid, 'focusHistory') || [];
       const remoteTimestamps = new Set(remoteEntries.map(e => e.timestamp));
       const newLocal = localHistory.filter(e => !remoteTimestamps.has(e.timestamp));
       const combined = [...remoteEntries, ...newLocal].sort((a, b) => new Date(b.timestamp) - new Date(a.timestamp));
       setFocusHistory(combined);
-      saveToLocal('focusHistory', combined);
+      saveToLocal(uid, 'focusHistory', combined);
       setRecentFocusHistory(combined.slice(0, 3));
       newLocal.forEach(entry => push(userRef('focusHistory'), entry));
     });
@@ -238,9 +239,10 @@ function App() {
       unsubStats();
       unsubFocusHistory();
     };
-  }, [user, loadFromLocal, saveToLocal, mergeArrayWithTimestamps, mergeObjectWithTimestamp]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [user]);
 
-  // Build subject dropdown options
+  // Build subject options
   useEffect(() => {
     const lectureSubjects = lectures.map(l => l.subject);
     const cwSubjects = coursework.map(c => c.text);
@@ -319,7 +321,7 @@ function App() {
     }
   };
 
-  // --- AI RECOMMENDATION ENGINE (Groq) – unchanged ---
+  // --- AI RECOMMENDATION ENGINE (Groq) ---
   const generateRecommendations = async () => {
     if (!user) return;
     setIsGenerating(true);
@@ -388,7 +390,7 @@ Instructions:
     };
     const updatedRevisions = [newEntry, ...revisions];
     setRevisions(updatedRevisions);
-    saveToLocal('revisions', updatedRevisions);
+    saveToLocal(user.uid, 'revisions', updatedRevisions);
     set(ref(db, `users/${user.uid}/revisions`), updatedRevisions);
     alert(`Added "${rec.subject}" revision at ${rec.startTime}`);
     setRecommendations(prev => prev.filter(r => r.id !== rec.id));
@@ -403,7 +405,7 @@ Instructions:
     if (lastActiveDate && lastActiveDate !== today) {
       const newStats = { total: sessionsCompleted, today: 0, lastDate: today, lastUpdated: Date.now() };
       update(ref(db, `users/${user.uid}/stats`), newStats);
-      saveToLocal('stats', newStats);
+      saveToLocal(user.uid, 'stats', newStats);
     }
   }, [lastActiveDate, user, sessionsCompleted, saveToLocal]);
 
@@ -418,7 +420,7 @@ Instructions:
       if (user) {
         const newTimerState = { currentFocus: val, lastUpdated: Date.now() };
         set(ref(db, `users/${user.uid}/timerState`), newTimerState);
-        saveToLocal('timerState', newTimerState);
+        saveToLocal(user.uid, 'timerState', newTimerState);
       }
     }
   };
@@ -429,7 +431,7 @@ Instructions:
     if (user) {
       const newTimerState = { currentFocus: val, lastUpdated: Date.now() };
       set(ref(db, `users/${user.uid}/timerState`), newTimerState);
-      saveToLocal('timerState', newTimerState);
+      saveToLocal(user.uid, 'timerState', newTimerState);
     }
   };
   const handleMinutesChange = (e) => {
@@ -466,10 +468,10 @@ Instructions:
           lastUpdated: Date.now()
         };
         set(ref(db, `users/${user.uid}/stats`), newStats);
-        saveToLocal('stats', newStats);
+        saveToLocal(user.uid, 'stats', newStats);
 
         const updatedHistory = [...focusHistory, sessionLog];
-        saveToLocal('focusHistory', updatedHistory);
+        saveToLocal(user.uid, 'focusHistory', updatedHistory);
         setRecentFocusHistory(updatedHistory.slice(-3));
         if (newDailyCount % 4 === 0) {
           alert("4 Sessions Done! Take a long 15-minute break.");
@@ -488,11 +490,12 @@ Instructions:
         if (user) {
           const newTimerState = { currentFocus: '', lastUpdated: Date.now() };
           set(ref(db, `users/${user.uid}/timerState`), newTimerState);
-          saveToLocal('timerState', newTimerState);
+          saveToLocal(user.uid, 'timerState', newTimerState);
         }
       }
     }
     return () => clearInterval(interval);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [isActive, seconds, totalTime, sessionsToday, sessionsCompleted, focusGoal, customMinutes, user, focusHistory, saveToLocal]);
 
   const progressOffset = (2 * Math.PI * 140) - (seconds / totalTime) * (2 * Math.PI * 140);
@@ -527,7 +530,7 @@ Instructions:
     if (ttTab === 'LECTURES') setLectures(updatedList);
     else if (ttTab === 'REVISION') setRevisions(updatedList);
     else setExams(updatedList);
-    saveToLocal(path, updatedList);
+    saveToLocal(user.uid, path, updatedList);
     set(ref(db, `users/${user.uid}/${path}`), updatedList);
     clearForm();
   };
@@ -548,7 +551,7 @@ Instructions:
     else if (type === 'EXAMS') setExams(updatedList);
     else if (type === 'TASK') setTasks(updatedList);
     else if (type === 'CW') setCoursework(updatedList);
-    saveToLocal(path, updatedList);
+    saveToLocal(user.uid, path, updatedList);
     set(ref(db, `users/${user.uid}/${path}`), updatedList);
   };
   const saveAcademic = () => {
@@ -559,7 +562,7 @@ Instructions:
     };
     const updatedCoursework = [newCw, ...coursework];
     setCoursework(updatedCoursework);
-    saveToLocal('coursework', updatedCoursework);
+    saveToLocal(user.uid, 'coursework', updatedCoursework);
     set(ref(db, `users/${user.uid}/coursework`), updatedCoursework);
     setCwInput(''); setCwDeadline(''); setCwDueTime('');
   };
@@ -567,7 +570,7 @@ Instructions:
     if (!user) return;
     const updated = coursework.map(x => x.id === id ? { ...x, completed: !x.completed, lastUpdated: Date.now() } : x);
     setCoursework(updated);
-    saveToLocal('coursework', updated);
+    saveToLocal(user.uid, 'coursework', updated);
     set(ref(db, `users/${user.uid}/coursework`), updated);
   };
   const addTask = () => {
@@ -575,7 +578,7 @@ Instructions:
     const newTask = { id: Date.now(), text: taskInput, completed: false, lastUpdated: Date.now() };
     const updatedTasks = [newTask, ...tasks];
     setTasks(updatedTasks);
-    saveToLocal('tasks', updatedTasks);
+    saveToLocal(user.uid, 'tasks', updatedTasks);
     set(ref(db, `users/${user.uid}/tasks`), updatedTasks);
     setTaskInput('');
   };
@@ -583,23 +586,70 @@ Instructions:
     if (!user) return;
     const updated = tasks.map(x => x.id === id ? { ...x, completed: !x.completed, lastUpdated: Date.now() } : x);
     setTasks(updated);
-    saveToLocal('tasks', updated);
+    saveToLocal(user.uid, 'tasks', updated);
     set(ref(db, `users/${user.uid}/tasks`), updated);
   };
   const clearCompletedTasks = () => {
     if (!user) return;
     const updated = tasks.filter(t => !t.completed);
     setTasks(updated);
-    saveToLocal('tasks', updated);
+    saveToLocal(user.uid, 'tasks', updated);
     set(ref(db, `users/${user.uid}/tasks`), updated);
   };
 
-  // --- RENDER AUTH SCREEN OR MAIN APP ---
+  // --- RENDER ---
   if (authLoading) {
     return (
       <div className="auth-loading">
-        <div className="pulse-icon">⏳</div>
-        <p>Loading...</p>
+        <div className="loading-spinner"></div>
+        <h1 className="loading-logo">FOCUS FLOW</h1>
+        <p className="loading-subtext">LOADING...</p>
+        <style>{`
+          .auth-loading {
+            min-height: 100vh;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            justify-content: center;
+            background: radial-gradient(circle at 50% 30%, #0a1a1a, #000);
+          }
+          .loading-spinner {
+            width: 60px;
+            height: 60px;
+            border: 4px solid rgba(0, 255, 249, 0.2);
+            border-top: 4px solid #00fff9;
+            border-radius: 50%;
+            animation: spin 1s linear infinite;
+            margin-bottom: 30px;
+            box-shadow: 0 0 15px #00fff9;
+          }
+          .loading-logo {
+            font-size: 2.5rem;
+            font-weight: 900;
+            color: #00fff9;
+            letter-spacing: 2px;
+            text-shadow: 0 0 15px #00fff9, 0 0 30px #00fff9;
+            animation: pulse 1.5s ease-in-out infinite;
+            margin: 0;
+          }
+          .loading-subtext {
+            margin-top: 15px;
+            font-size: 0.9rem;
+            color: #00fff9;
+            letter-spacing: 4px;
+            animation: pulse 1.5s ease-in-out infinite;
+            opacity: 0.8;
+          }
+          @keyframes spin {
+            0% { transform: rotate(0deg); }
+            100% { transform: rotate(360deg); }
+          }
+          @keyframes pulse {
+            0% { opacity: 0.5; text-shadow: 0 0 10px #00fff9; }
+            50% { opacity: 1; text-shadow: 0 0 20px #00fff9, 0 0 30px #00fff9; }
+            100% { opacity: 0.5; text-shadow: 0 0 10px #00fff9; }
+          }
+        `}</style>
       </div>
     );
   }
@@ -672,7 +722,7 @@ Instructions:
     );
   }
 
-  // --- MAIN AUTHENTICATED APP (updated labels) ---
+  // --- MAIN AUTHENTICATED APP ---
   return (
     <div className="App">
       {showProfile && (
@@ -699,6 +749,7 @@ Instructions:
       </header>
 
       <main className="content">
+        {/* Home screen */}
         {currentScreen === 'HOME' && (
           <div className="magic-flow-container">
             <h4 className="section-label">TODAY'S FLOW ({todayName.toUpperCase()})</h4>
@@ -721,6 +772,7 @@ Instructions:
           </div>
         )}
 
+        {/* Timetable screen */}
         {currentScreen === 'TIMETABLE' && (
           <div className="center-view">
             <div className="tab-pill">
@@ -764,6 +816,7 @@ Instructions:
           </div>
         )}
 
+        {/* AI screen */}
         {currentScreen === 'AI_GEN' && (
           <div className="center-view">
             <button className="back-btn" onClick={() => setCurrentScreen('TIMETABLE')} style={{ alignSelf: 'flex-start', marginBottom: '10px' }}>
@@ -814,6 +867,7 @@ Instructions:
           </div>
         )}
 
+        {/* Coursework screen */}
         {currentScreen === 'ACADEMIC' && (
           <div className="center-view">
             <h4 className="section-label">COURSEWORK</h4>
@@ -852,6 +906,7 @@ Instructions:
           </div>
         )}
 
+        {/* Tasks screen */}
         {currentScreen === 'TASKS' && (
           <div className="center-view">
             <h4 className="section-label">DAILY TASKS</h4>
@@ -874,6 +929,7 @@ Instructions:
           </div>
         )}
 
+        {/* Focus screen */}
         {currentScreen === 'FOCUS' && (
           <div className="center-view timer-screen">
             {!isActive && seconds === totalTime ? (
@@ -953,11 +1009,11 @@ Instructions:
         <button onClick={() => setCurrentScreen('FOCUS')} className={currentScreen === 'FOCUS' ? 'active' : ''}>⏱️<span>Focus</span></button>
       </nav>
 
+      {/* Global styles */}
       <style>{`
         :root { --neon: #00fff9; --revision: #c471ed; --exam: #f39c12; --bg: #000; }
         body { margin: 0; background: var(--bg); color: #fff; font-family: 'Inter', sans-serif; }
         .App { min-height: 100vh; padding-bottom: 120px; }
-        
         .back-btn { background: transparent; border: 1px solid rgba(255,255,255,0.2); color: #aaa; padding: 8px 16px; border-radius: 20px; font-size: 0.8rem; cursor: pointer; transition: all 0.2s; margin-bottom: 15px; align-self: flex-start; }
         .back-btn:hover { border-color: var(--neon); color: var(--neon); }
         .ai-intro-card { background: rgba(255,255,255,0.03); border: 1px solid rgba(255,255,255,0.08); border-radius: 20px; padding: 30px 20px; backdrop-filter: blur(8px); }
@@ -1074,7 +1130,6 @@ Instructions:
         .profile-btn.logout:hover { background: #f44; color: #000; box-shadow: 0 0 20px #f44; }
         .profile-btn.danger { border-color: #ff3a6f; color: #ff3a6f; box-shadow: 0 0 10px rgba(255, 58, 111, 0.3); }
         .profile-btn.danger:hover { background: #ff3a6f; color: #000; box-shadow: 0 0 20px #ff3a6f; }
-        .auth-loading { min-height: 100vh; display: flex; flex-direction: column; align-items: center; justify-content: center; color: var(--neon); }
       `}</style>
     </div>
   );
