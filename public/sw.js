@@ -42,23 +42,30 @@ function loadNotifications() {
   });
 }
 
-// ------ Notification checker ------
+// ------ Notification checker (only fires recent overdue) ------
 async function checkAndFireNotifications() {
   const items = await loadNotifications();
   const now = Date.now();
+  const MAX_LATE_MS = 5 * 60 * 1000;  // 5 minutes – older items are ignored
+
   for (const item of items) {
     const scheduledTime = new Date(item.scheduledAt).getTime();
-    if (scheduledTime <= now) {
-      // Fire notification
+    const lateness = now - scheduledTime;
+
+    if (lateness >= 0 && lateness <= MAX_LATE_MS) {
+      // Due within the window → fire & delete
       await self.registration.showNotification(item.title, {
         body: item.body,
         icon: '/logo192.png',
         badge: '/logo192.png',
         tag: item.id,
       });
-      // Remove from DB so it won't fire again
+      await deleteNotification(item.id);
+    } else if (lateness > MAX_LATE_MS) {
+      // Too old → just remove from DB to avoid clutter
       await deleteNotification(item.id);
     }
+    // Future items (lateness < 0) are kept for later checks
   }
 }
 
@@ -110,7 +117,6 @@ self.addEventListener('fetch', (event) => {
 self.addEventListener('activate', (event) => {
   event.waitUntil(
     Promise.all([
-      // Clear old caches
       caches.keys().then((cacheNames) => {
         return Promise.all(
           cacheNames.map((cacheName) => {
@@ -120,11 +126,9 @@ self.addEventListener('activate', (event) => {
           })
         );
       }),
-      // Load existing notifications and start checker
       loadNotifications().then(() => startNotificationChecker())
     ])
   );
-  // Immediately check on activation
   checkAndFireNotifications();
 });
 
@@ -133,15 +137,13 @@ self.addEventListener('message', (event) => {
   if (event.data && event.data.type === 'SCHEDULE_NOTIFICATIONS') {
     const { notifications } = event.data;
     saveNotifications(notifications).then(() => {
-      // Restart checker with fresh data
       startNotificationChecker();
-      // Also check immediately
       checkAndFireNotifications();
     });
   }
 });
 
-// Optional periodic sync (if supported)
+// Optional periodic sync
 self.addEventListener('periodicsync', (event) => {
   if (event.tag === 'notification-check') {
     event.waitUntil(checkAndFireNotifications());
