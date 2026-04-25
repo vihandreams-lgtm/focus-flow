@@ -78,6 +78,17 @@ function App() {
   const [customMinutes, setCustomMinutes] = useState(25);
   const [showHistory, setShowHistory] = useState(false);
 
+  // ========== HEARTBEAT (MOBILE RE-RENDER) ==========
+  const [timeTick, setTimeTick] = useState(0);
+
+  useEffect(() => {
+    const interval = setInterval(() => {
+      setTimeTick(prev => prev + 1);
+    }, 30000); // every 30 seconds
+
+    return () => clearInterval(interval);
+  }, []);
+
   // ========== NOTIFICATION SYSTEM ==========
   const notificationTimeouts = useRef([]);
 
@@ -302,7 +313,7 @@ function App() {
     return [...combined, ...todayTests].sort((a, b) => a.startTime.localeCompare(b.startTime));
   }, [lectures, revisions, exams, coursework, todayName, todayISO]);
 
-  // ========== NOTIFICATION SCHEDULER ==========
+  // ========== NOTIFICATION SCHEDULER (RESCHEDULES ON HEARTBEAT) ==========
   useEffect(() => {
     if (!user) return;
 
@@ -342,7 +353,7 @@ function App() {
     });
 
     return () => notificationTimeouts.current.forEach(clearTimeout);
-  }, [todaysActivities, coursework, user, notify]);
+  }, [todaysActivities, coursework, user, notify, timeTick]); // ← timeTick triggers re‑schedule
 
   // --- AUTH HANDLERS ---
   const passwordLongEnough = authPassword.length >= 6;
@@ -789,7 +800,7 @@ Instructions:
     );
   }
 
-  // --- MAIN AUTHENTICATED APP (unchanged UI) ---
+  // --- MAIN AUTHENTICATED APP ---
   return (
     <div className="App">
       {showProfile && (
