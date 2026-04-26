@@ -378,6 +378,57 @@ function App() {
     sendScheduleToSW();
   }, [sendScheduleToSW]);
 
+  // ========== INSTANT NOTIFICATIONS (UI-LEVEL) ==========
+  const notify = useCallback((title, body) => {
+    if (typeof Notification !== 'undefined' && Notification.permission === 'granted') {
+      new Notification(title, { body });
+      const audio = new Audio('https://assets.mixkit.co/active_storage/sfx/2869/2869-preview.mp3');
+      audio.play().catch(() => {});
+    }
+  }, []);
+
+  const notifiedRef = useRef(new Set());
+
+  useEffect(() => {
+    if (!user) return;
+
+    todaysActivities.forEach(act => {
+      if (!act.startTime) return;
+      const [h, m] = act.startTime.split(':').map(Number);
+      const startDate = new Date(now.getFullYear(), now.getMonth(), now.getDate(), h, m, 0);
+      const preDate = new Date(startDate.getTime() - 10 * 60 * 1000);
+
+      const nowTime = now.getTime();
+
+      // 10-minute warning
+      if (nowTime >= preDate.getTime() && nowTime < startDate.getTime()) {
+        const key = `pre-${act.id}`;
+        if (!notifiedRef.current.has(key)) {
+          notify(`⏰ ${act.subject} ${act.category}`, 'Starting in 10 minutes');
+          notifiedRef.current.add(key);
+        }
+      }
+
+      // Start notification
+      if (nowTime >= startDate.getTime() && nowTime < startDate.getTime() + 60000) {
+        const key = `start-${act.id}`;
+        if (!notifiedRef.current.has(key)) {
+          notify(`🔔 ${act.subject} ${act.category}`, 'Starting now');
+          notifiedRef.current.add(key);
+        }
+      }
+    });
+  }, [now, todaysActivities, user, notify]);
+
+  // Clear notified set at midnight to reset for the next day
+  useEffect(() => {
+    const midnight = new Date();
+    midnight.setHours(24, 0, 0, 0);
+    const timeToMidnight = midnight.getTime() - Date.now();
+    const timer = setTimeout(() => notifiedRef.current.clear(), timeToMidnight);
+    return () => clearTimeout(timer);
+  }, []);
+
   // --- AUTH HANDLERS ---
   const passwordLongEnough = authPassword.length >= 6;
   const passwordHasNumber = /\d/.test(authPassword);

@@ -4,9 +4,9 @@ const CACHE_NAME = 'focusflow-v2';
 const DB_NAME = 'focusflow-notif-db';
 const DB_VERSION = 1;
 const STORE_NAME = 'notifications';
-let notifInterval = null;
+let timers = [];  // store active timers to clear on update
 
-// ------ IndexedDB helpers ------
+// ------ IndexedDB helpers (unchanged) ------
 function openDB() {
   return new Promise((resolve, reject) => {
     const request = indexedDB.open(DB_NAME, DB_VERSION);
@@ -42,33 +42,6 @@ function loadNotifications() {
   });
 }
 
-// ------ Notification checker (only fires recent overdue) ------
-async function checkAndFireNotifications() {
-  const items = await loadNotifications();
-  const now = Date.now();
-  const MAX_LATE_MS = 5 * 60 * 1000;  // 5 minutes – older items are ignored
-
-  for (const item of items) {
-    const scheduledTime = new Date(item.scheduledAt).getTime();
-    const lateness = now - scheduledTime;
-
-    if (lateness >= 0 && lateness <= MAX_LATE_MS) {
-      // Due within the window → fire & delete
-      await self.registration.showNotification(item.title, {
-        body: item.body,
-        icon: '/logo192.png',
-        badge: '/logo192.png',
-        tag: item.id,
-      });
-      await deleteNotification(item.id);
-    } else if (lateness > MAX_LATE_MS) {
-      // Too old → just remove from DB to avoid clutter
-      await deleteNotification(item.id);
-    }
-    // Future items (lateness < 0) are kept for later checks
-  }
-}
-
 function deleteNotification(id) {
   return openDB().then(db => {
     const tx = db.transaction(STORE_NAME, 'readwrite');
@@ -77,12 +50,67 @@ function deleteNotification(id) {
   });
 }
 
-function startNotificationChecker() {
-  if (notifInterval) clearInterval(notifInterval);
-  notifInterval = setInterval(checkAndFireNotifications, 60000); // check every 60s
+// ------ Schedule individual timers ------
+function scheduleItem(item) {
+  const scheduledTime = new Date(item.scheduledAt).getTime();
+  const delay = scheduledTime - Date.now();
+  if (delay <= 0) {
+    // Already due → fire immediately
+    fireAndDelete(item);
+  } else {
+    const timer = setTimeout(() => fireAndDelete(item), delay);
+    timers.push(timer);
+  }
 }
 
-// ------ Cache install/activate (unchanged) ------
+function clearTimers() {
+  timers.forEach(clearTimeout);
+  timers = [];
+}
+
+async function fireAndDelete(item) {
+  await self.registration.showNotification(item.title, {
+    body: item.body,
+    icon: '/logo192.png',
+    badge: '/logo192.png',
+    tag: item.id,
+  });
+  await deleteNotification(item.id);
+}
+
+// On new schedule from App.js or on activation, reschedule
+async function rescheduleAll() {
+  clearTimers();
+  const items = await loadNotifications();
+  items.forEach(scheduleItem);
+}
+
+// ------ Message from App.js ------
+self.addEventListener('message', (event) => {
+  if (event.data && event.data.type === 'SCHEDULE_NOTIFICATIONS') {
+    saveNotifications(event.data.notifications).then(rescheduleAll);
+  }
+});
+
+// ------ Activate event ------
+self.addEventListener('activate', (event) => {
+  event.waitUntil(
+    Promise.all([
+      caches.keys().then((cacheNames) => {
+        return Promise.all(
+          cacheNames.map((cacheName) => {
+            if (cacheName !== CACHE_NAME) {
+              return caches.delete(cacheName);
+            }
+          })
+        );
+      }),
+      rescheduleAll()
+    ])
+  );
+});
+
+// ------ Install & cache (unchanged) ------
 self.addEventListener('install', (event) => {
   event.waitUntil(
     caches.open(CACHE_NAME).then((cache) => {
@@ -112,40 +140,4 @@ self.addEventListener('fetch', (event) => {
       });
     })
   );
-});
-
-self.addEventListener('activate', (event) => {
-  event.waitUntil(
-    Promise.all([
-      caches.keys().then((cacheNames) => {
-        return Promise.all(
-          cacheNames.map((cacheName) => {
-            if (cacheName !== CACHE_NAME) {
-              return caches.delete(cacheName);
-            }
-          })
-        );
-      }),
-      loadNotifications().then(() => startNotificationChecker())
-    ])
-  );
-  checkAndFireNotifications();
-});
-
-// ------ Message from App.js ------
-self.addEventListener('message', (event) => {
-  if (event.data && event.data.type === 'SCHEDULE_NOTIFICATIONS') {
-    const { notifications } = event.data;
-    saveNotifications(notifications).then(() => {
-      startNotificationChecker();
-      checkAndFireNotifications();
-    });
-  }
-});
-
-// Optional periodic sync
-self.addEventListener('periodicsync', (event) => {
-  if (event.tag === 'notification-check') {
-    event.waitUntil(checkAndFireNotifications());
-  }
 });
