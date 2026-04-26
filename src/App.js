@@ -1,15 +1,16 @@
 import React, { useState, useEffect, useMemo, useCallback, useRef } from 'react';
+import OpenAI from "openai";
 import { db } from './firebase';
-import { 
-  getAuth, 
-  createUserWithEmailAndPassword, 
-  signInWithEmailAndPassword, 
-  signOut, 
+import {
+  getAuth,
+  createUserWithEmailAndPassword,
+  signInWithEmailAndPassword,
+  signOut,
   onAuthStateChanged,
-  deleteUser 
+  deleteUser
 } from 'firebase/auth';
 import { ref, set, onValue, update, push, remove } from "firebase/database";
-import OpenAI from "openai";
+import * as XLSX from 'xlsx';
 
 function App() {
   // --- AUTHENTICATION STATE ---
@@ -78,7 +79,7 @@ function App() {
   const [customMinutes, setCustomMinutes] = useState(25);
   const [showHistory, setShowHistory] = useState(false);
 
-  // ========== LIVE NOW STATE (UPDATES EVERY SECOND) ==========
+  // ========== LIVE NOW STATE ==========
   const [now, setNow] = useState(new Date());
 
   useEffect(() => {
@@ -90,7 +91,6 @@ function App() {
 
   // ========== SERVICE WORKER COMMUNICATION ==========
   const swRegRef = useRef(null);
-
   useEffect(() => {
     if ('serviceWorker' in navigator) {
       navigator.serviceWorker.ready.then(reg => {
@@ -99,38 +99,32 @@ function App() {
     }
   }, []);
 
-  // Audio unlock (still useful for in-app sounds)
+  // ========== AUDIO UNLOCK ==========
   const unlockAudio = useCallback(() => {
     const silent = new Audio('data:audio/wav;base64,UklGRigAAABXQVZFZm10IBIAAAABAAEARKwAAIhYAQACABAAAABkYXRhAgAAAAEA');
     silent.play().then(() => {}).catch(() => {});
     document.removeEventListener('click', unlockAudio);
   }, []);
-
   useEffect(() => {
     document.addEventListener('click', unlockAudio);
     return () => document.removeEventListener('click', unlockAudio);
   }, [unlockAudio]);
 
-  // Request notification permission on login
+  // ========== NOTIFICATION PERMISSION ==========
   const requestNotificationPermission = useCallback(async () => {
     if (typeof Notification !== 'undefined' && Notification.permission === 'default') {
       await Notification.requestPermission();
     }
   }, []);
-
   useEffect(() => {
     if (user) requestNotificationPermission();
   }, [user, requestNotificationPermission]);
 
-  // ---------- localStorage helpers (stable) ----------
+  // ---------- localStorage helpers ----------
   const getStorageKey = (uid, key) => `focusflow_${uid}_${key}`;
-
   const saveToLocal = useCallback((uid, key, data) => {
-    try {
-      localStorage.setItem(getStorageKey(uid, key), JSON.stringify(data));
-    } catch (e) { console.warn('localStorage save failed', e); }
+    try { localStorage.setItem(getStorageKey(uid, key), JSON.stringify(data)); } catch (e) { console.warn('localStorage save failed', e); }
   }, []);
-
   const loadFromLocal = useCallback((uid, key) => {
     try {
       const raw = localStorage.getItem(getStorageKey(uid, key));
@@ -138,7 +132,7 @@ function App() {
     } catch { return null; }
   }, []);
 
-  // ---------- SMART MERGE FUNCTIONS (stable) ----------
+  // ---------- SMART MERGE FUNCTIONS ----------
   const mergeArrayWithTimestamps = useCallback((remoteData, uid, path) => {
     const localData = loadFromLocal(uid, path) || [];
     const merged = [];
@@ -177,14 +171,12 @@ function App() {
     return remoteData;
   }, [loadFromLocal]);
 
-  // ========== MASTER SYNC ENGINE (NO LOOP) ==========
+  // ========== MASTER SYNC ENGINE ==========
   useEffect(() => {
     if (!user) return;
-
     const uid = user.uid;
     const userRef = (path) => ref(db, `users/${uid}/${path}`);
 
-    // Pre‑load cached data
     const preload = (key, setter) => { const d = loadFromLocal(uid, key); if (d) setter(d); };
     preload('tasks', setTasks);
     preload('lectures', setLectures);
@@ -206,46 +198,25 @@ function App() {
       setRecentFocusHistory(sorted.slice(0, 3));
     }
 
-    // Subscriptions with functional state updates
     const unsubTasks = onValue(userRef('tasks'), (snap) => {
       const remote = snap.val() || [];
-      setTasks(prev => {
-        const merged = mergeArrayWithTimestamps(remote, uid, 'tasks');
-        saveToLocal(uid, 'tasks', merged);
-        return merged;
-      });
+      setTasks(prev => { const merged = mergeArrayWithTimestamps(remote, uid, 'tasks'); saveToLocal(uid, 'tasks', merged); return merged; });
     });
     const unsubLectures = onValue(userRef('lectures'), (snap) => {
       const remote = snap.val() || [];
-      setLectures(prev => {
-        const merged = mergeArrayWithTimestamps(remote, uid, 'lectures');
-        saveToLocal(uid, 'lectures', merged);
-        return merged;
-      });
+      setLectures(prev => { const merged = mergeArrayWithTimestamps(remote, uid, 'lectures'); saveToLocal(uid, 'lectures', merged); return merged; });
     });
     const unsubRevisions = onValue(userRef('revisions'), (snap) => {
       const remote = snap.val() || [];
-      setRevisions(prev => {
-        const merged = mergeArrayWithTimestamps(remote, uid, 'revisions');
-        saveToLocal(uid, 'revisions', merged);
-        return merged;
-      });
+      setRevisions(prev => { const merged = mergeArrayWithTimestamps(remote, uid, 'revisions'); saveToLocal(uid, 'revisions', merged); return merged; });
     });
     const unsubExams = onValue(userRef('exams'), (snap) => {
       const remote = snap.val() || [];
-      setExams(prev => {
-        const merged = mergeArrayWithTimestamps(remote, uid, 'exams');
-        saveToLocal(uid, 'exams', merged);
-        return merged;
-      });
+      setExams(prev => { const merged = mergeArrayWithTimestamps(remote, uid, 'exams'); saveToLocal(uid, 'exams', merged); return merged; });
     });
     const unsubCoursework = onValue(userRef('coursework'), (snap) => {
       const remote = snap.val() || [];
-      setCoursework(prev => {
-        const merged = mergeArrayWithTimestamps(remote, uid, 'coursework');
-        saveToLocal(uid, 'coursework', merged);
-        return merged;
-      });
+      setCoursework(prev => { const merged = mergeArrayWithTimestamps(remote, uid, 'coursework'); saveToLocal(uid, 'coursework', merged); return merged; });
     });
     const unsubTimerState = onValue(userRef('timerState'), (snap) => {
       const remote = snap.val() || {};
@@ -277,14 +248,8 @@ function App() {
     });
 
     return () => {
-      unsubTasks();
-      unsubLectures();
-      unsubRevisions();
-      unsubExams();
-      unsubCoursework();
-      unsubTimerState();
-      unsubStats();
-      unsubFocusHistory();
+      unsubTasks(); unsubLectures(); unsubRevisions(); unsubExams(); unsubCoursework();
+      unsubTimerState(); unsubStats(); unsubFocusHistory();
     };
   }, [user, mergeArrayWithTimestamps, mergeObjectWithTimestamp, saveToLocal, loadFromLocal]);
 
@@ -297,7 +262,7 @@ function App() {
   const todayName = new Intl.DateTimeFormat('en-US', { weekday: 'long' }).format(new Date());
   const todayISO = new Date().toISOString().split('T')[0];
 
-  // --- TODAY'S ACTIVITIES (including Tests from Academic) ---
+  // --- TODAY'S ACTIVITIES ---
   const todaysActivities = useMemo(() => {
     const combined = [
       ...lectures.filter(f => f.day === todayName).map(i => ({...i, category: 'LECTURE'})),
@@ -317,110 +282,71 @@ function App() {
   // ========== SEND SCHEDULE TO SERVICE WORKER ==========
   const sendScheduleToSW = useCallback(() => {
     if (!swRegRef.current || !swRegRef.current.active || !user) return;
-
     const nowTime = new Date();
     const notifications = [];
-
-    // Daily Flow notifications (10 min before and at start)
     todaysActivities.forEach(act => {
       if (!act.startTime) return;
       const [h, m] = act.startTime.split(':').map(Number);
       const startDate = new Date(nowTime.getFullYear(), nowTime.getMonth(), nowTime.getDate(), h, m, 0);
-      
       const preDate = new Date(startDate.getTime() - 10 * 60 * 1000);
-      notifications.push({
-        id: `act-pre-${act.id}`,
-        title: `⏰ ${act.subject} ${act.category}`,
-        body: `Starting in 10 minutes`,
-        scheduledAt: preDate.toISOString(),
-      });
-      notifications.push({
-        id: `act-start-${act.id}`,
-        title: `🔔 ${act.subject} ${act.category}`,
-        body: `Starting now`,
-        scheduledAt: startDate.toISOString(),
-      });
+      notifications.push({ id: `act-pre-${act.id}`, title: `⏰ ${act.subject} ${act.category}`, body: `Starting in 10 minutes`, scheduledAt: preDate.toISOString() });
+      notifications.push({ id: `act-start-${act.id}`, title: `🔔 ${act.subject} ${act.category}`, body: `Starting now`, scheduledAt: startDate.toISOString() });
     });
-
-    // Coursework deadline reminders (2 days and 1 day before)
     coursework.forEach(cw => {
       if (cw.completed || !cw.deadline) return;
       const deadlineDate = new Date(cw.deadline + 'T09:00:00');
       if (isNaN(deadlineDate.getTime())) return;
-      
       const twoDaysBefore = new Date(deadlineDate);
       twoDaysBefore.setDate(deadlineDate.getDate() - 2);
       const oneDayBefore = new Date(deadlineDate);
       oneDayBefore.setDate(deadlineDate.getDate() - 1);
-      
-      notifications.push({
-        id: `cw-2day-${cw.id}`,
-        title: `📚 Coursework Reminder`,
-        body: `${cw.text} due in 2 days (${cw.deadline})`,
-        scheduledAt: twoDaysBefore.toISOString(),
-      });
-      notifications.push({
-        id: `cw-1day-${cw.id}`,
-        title: `📚 Coursework Reminder`,
-        body: `${cw.text} due tomorrow! (${cw.deadline})`,
-        scheduledAt: oneDayBefore.toISOString(),
-      });
+      notifications.push({ id: `cw-2day-${cw.id}`, title: `📚 Coursework Reminder`, body: `${cw.text} due in 2 days (${cw.deadline})`, scheduledAt: twoDaysBefore.toISOString() });
+      notifications.push({ id: `cw-1day-${cw.id}`, title: `📚 Coursework Reminder`, body: `${cw.text} due tomorrow! (${cw.deadline})`, scheduledAt: oneDayBefore.toISOString() });
     });
-
-    swRegRef.current.active.postMessage({
-      type: 'SCHEDULE_NOTIFICATIONS',
-      notifications,
-    });
+    swRegRef.current.active.postMessage({ type: 'SCHEDULE_NOTIFICATIONS', notifications });
   }, [todaysActivities, coursework, user]);
 
-  // Send to SW whenever schedule data changes
-  useEffect(() => {
-    sendScheduleToSW();
-  }, [sendScheduleToSW]);
+  useEffect(() => { sendScheduleToSW(); }, [sendScheduleToSW]);
 
-  // ========== INSTANT NOTIFICATIONS (UI-LEVEL) ==========
-  const notify = useCallback((title, body) => {
-    if (typeof Notification !== 'undefined' && Notification.permission === 'granted') {
-      new Notification(title, { body });
-      const audio = new Audio('https://assets.mixkit.co/active_storage/sfx/2869/2869-preview.mp3');
-      audio.play().catch(() => {});
-    }
+  // ========== INSTANT NOTIFICATIONS (CRASH‑PROOF) ==========
+  const safeNotify = useCallback((title, body) => {
+    try {
+      if (typeof Notification !== 'undefined' && Notification.permission === 'granted') {
+        new Notification(title, { body });
+        const audio = new Audio('https://assets.mixkit.co/active_storage/sfx/2869/2869-preview.mp3');
+        audio.play().catch(() => {});
+      }
+    } catch (error) { console.warn('Notification error:', error); }
   }, []);
 
   const notifiedRef = useRef(new Set());
-
   useEffect(() => {
     if (!user) return;
-
-    todaysActivities.forEach(act => {
-      if (!act.startTime) return;
-      const [h, m] = act.startTime.split(':').map(Number);
-      const startDate = new Date(now.getFullYear(), now.getMonth(), now.getDate(), h, m, 0);
-      const preDate = new Date(startDate.getTime() - 10 * 60 * 1000);
-
-      const nowTime = now.getTime();
-
-      // 10-minute warning
-      if (nowTime >= preDate.getTime() && nowTime < startDate.getTime()) {
-        const key = `pre-${act.id}`;
-        if (!notifiedRef.current.has(key)) {
-          notify(`⏰ ${act.subject} ${act.category}`, 'Starting in 10 minutes');
-          notifiedRef.current.add(key);
+    try {
+      todaysActivities.forEach(act => {
+        if (!act.startTime) return;
+        const [h, m] = act.startTime.split(':').map(Number);
+        const startDate = new Date(now.getFullYear(), now.getMonth(), now.getDate(), h, m, 0);
+        const preDate = new Date(startDate.getTime() - 10 * 60 * 1000);
+        const nowTime = now.getTime();
+        if (nowTime >= preDate.getTime() && nowTime < startDate.getTime()) {
+          const key = `pre-${act.id}`;
+          if (!notifiedRef.current.has(key)) {
+            safeNotify(`⏰ ${act.subject} ${act.category}`, 'Starting in 10 minutes');
+            notifiedRef.current.add(key);
+          }
         }
-      }
-
-      // Start notification
-      if (nowTime >= startDate.getTime() && nowTime < startDate.getTime() + 60000) {
-        const key = `start-${act.id}`;
-        if (!notifiedRef.current.has(key)) {
-          notify(`🔔 ${act.subject} ${act.category}`, 'Starting now');
-          notifiedRef.current.add(key);
+        if (nowTime >= startDate.getTime() && nowTime < startDate.getTime() + 60000) {
+          const key = `start-${act.id}`;
+          if (!notifiedRef.current.has(key)) {
+            safeNotify(`🔔 ${act.subject} ${act.category}`, 'Starting now');
+            notifiedRef.current.add(key);
+          }
         }
-      }
-    });
-  }, [now, todaysActivities, user, notify]);
+      });
+    } catch (error) { console.warn('Instant notification check error:', error); }
+  }, [now, todaysActivities, user, safeNotify]);
 
-  // Clear notified set at midnight to reset for the next day
   useEffect(() => {
     const midnight = new Date();
     midnight.setHours(24, 0, 0, 0);
@@ -432,7 +358,6 @@ function App() {
   // --- AUTH HANDLERS ---
   const passwordLongEnough = authPassword.length >= 6;
   const passwordHasNumber = /\d/.test(authPassword);
-
   const isSignupValid = useCallback(() => {
     if (authMode !== 'signup') return true;
     return passwordLongEnough && passwordHasNumber && authPassword === authConfirmPassword;
@@ -467,37 +392,26 @@ function App() {
       keys.forEach(k => localStorage.removeItem(k));
       await deleteUser(user);
       setShowProfile(false);
-    } catch (error) {
-      console.error('Delete account error:', error);
-      alert('Failed to delete account. You may need to re-authenticate. ' + error.message);
-    }
+    } catch (error) { console.error('Delete account error:', error); alert('Failed to delete account. You may need to re-authenticate. ' + error.message); }
   };
 
-  // --- AI RECOMMENDATION ENGINE (Groq) ---
+  // --- AI RECOMMENDATION ENGINE (Groq) – unchanged for revision timetable ---
   const generateRecommendations = async () => {
     if (!user) return;
+    const groqKey = process.env.REACT_APP_GROQ_KEY;
+    if (!groqKey) { alert("Groq API key not configured. Please add REACT_APP_GROQ_KEY to your .env file to use this feature."); return; }
     setIsGenerating(true);
     setRecommendations([]);
     try {
-      const apiKey = process.env.REACT_APP_GROQ_KEY;
-      const groq = new OpenAI({
-        apiKey: apiKey,
-        baseURL: "https://api.groq.com/openai/v1",
-        dangerouslyAllowBrowser: true
-      });
+      const groq = new OpenAI({ apiKey: groqKey, baseURL: "https://api.groq.com/openai/v1", dangerouslyAllowBrowser: true });
       const currentTime = new Date();
       const currentTimeStr = currentTime.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', hour12: false });
       const todayStr = currentTime.toLocaleDateString();
-      const todaysSchedule = todaysActivities.map(act => ({
-        subject: act.subject, start: act.startTime, end: act.endTime || act.startTime, category: act.category
-      }));
-      const courseworkItems = coursework.map(cw => ({
-        subject: cw.text, deadline: cw.deadline, type: cw.type
-      }));
+      const todaysSchedule = todaysActivities.map(act => ({ subject: act.subject, start: act.startTime, end: act.endTime || act.startTime, category: act.category }));
+      const courseworkItems = coursework.map(cw => ({ subject: cw.text, deadline: cw.deadline, type: cw.type }));
       const twoWeeksAgo = new Date(); twoWeeksAgo.setDate(twoWeeksAgo.getDate() - 14);
       const recentHistory = focusHistory.filter(entry => new Date(entry.timestamp) >= twoWeeksAgo);
-      const prompt = `
-You are an AI study planner. Based on the following data, create a personalised revision timetable for TODAY.
+      const prompt = `You are an AI study planner. Based on the following data, create a personalised revision timetable for TODAY.
 Current time: ${currentTimeStr} on ${todayStr}. Only suggest slots that start AFTER the current time.
 Today's existing schedule: ${JSON.stringify(todaysSchedule, null, 2)}
 Coursework and deadlines: ${JSON.stringify(courseworkItems, null, 2)}
@@ -510,36 +424,22 @@ Instructions:
 - Return ONLY a JSON array of objects with keys: subject, startTime, endTime, reasoning.`;
       const completion = await groq.chat.completions.create({
         model: "llama-3.3-70b-versatile",
-        messages: [
-          { role: "system", content: "You are a helpful study planner. Respond only with valid JSON." },
-          { role: "user", content: prompt }
-        ],
+        messages: [{ role: "system", content: "You are a helpful study planner. Respond only with valid JSON." }, { role: "user", content: prompt }],
         temperature: 0.3,
       });
       const responseText = completion.choices[0].message.content;
       const jsonMatch = responseText.match(/\[[\s\S]*\]/);
       if (!jsonMatch) throw new Error("Invalid AI response format");
       const parsed = JSON.parse(jsonMatch[0]);
-      const validated = parsed.filter(rec => rec.subject && rec.startTime && rec.endTime && rec.reasoning)
-        .map((rec, idx) => ({ ...rec, id: Date.now() + idx }));
+      const validated = parsed.filter(rec => rec.subject && rec.startTime && rec.endTime && rec.reasoning).map((rec, idx) => ({ ...rec, id: Date.now() + idx }));
       setRecommendations(validated);
-    } catch (error) {
-      console.error("AI generation error:", error);
-      alert("AI service unavailable. Please try again later.");
-    } finally { setIsGenerating(false); }
+    } catch (error) { console.error("AI generation error:", error); alert("AI service unavailable. Please try again later."); }
+    finally { setIsGenerating(false); }
   };
 
   const handleAddRecommendation = (rec) => {
     if (!user) return;
-    const newEntry = {
-      id: Date.now(),
-      subject: rec.subject,
-      startTime: rec.startTime,
-      endTime: rec.endTime,
-      venue: 'AI Recommended',
-      day: todayName,
-      lastUpdated: Date.now()
-    };
+    const newEntry = { id: Date.now(), subject: rec.subject, startTime: rec.startTime, endTime: rec.endTime, venue: 'AI Recommended', day: todayName, lastUpdated: Date.now() };
     const updatedRevisions = [newEntry, ...revisions];
     setRevisions(updatedRevisions);
     saveToLocal(user.uid, 'revisions', updatedRevisions);
@@ -547,10 +447,9 @@ Instructions:
     alert(`Added "${rec.subject}" revision at ${rec.startTime}`);
     setRecommendations(prev => prev.filter(r => r.id !== rec.id));
   };
-
   const dismissRecommendation = (id) => { setRecommendations(prev => prev.filter(r => r.id !== id)); };
 
-  // --- FOCUS TIMER LOGIC (with localStorage backup) ---
+  // --- FOCUS TIMER LOGIC --- (unchanged)
   useEffect(() => {
     if (!user) return;
     const today = new Date().toLocaleDateString();
@@ -563,10 +462,8 @@ Instructions:
 
   const handleFocusChange = (e) => {
     const val = e.target.value;
-    if (val === 'custom') {
-      setIsCustomFocus(true);
-      setFocusGoal('');
-    } else {
+    if (val === 'custom') { setIsCustomFocus(true); setFocusGoal(''); }
+    else {
       setIsCustomFocus(false);
       setFocusGoal(val);
       if (user) {
@@ -588,50 +485,28 @@ Instructions:
   };
   const handleMinutesChange = (e) => {
     const mins = parseInt(e.target.value, 10);
-    if (!isNaN(mins) && mins > 0) {
-      setCustomMinutes(mins);
-      setTotalTime(mins * 60);
-      setSeconds(mins * 60);
-    }
+    if (!isNaN(mins) && mins > 0) { setCustomMinutes(mins); setTotalTime(mins * 60); setSeconds(mins * 60); }
   };
 
   useEffect(() => {
     let interval = null;
-    if (isActive && seconds > 0) {
-      interval = setInterval(() => setSeconds(s => s - 1), 1000);
-    } else if (seconds === 0 && isActive) {
+    if (isActive && seconds > 0) { interval = setInterval(() => setSeconds(s => s - 1), 1000); }
+    else if (seconds === 0 && isActive) {
       setIsActive(false);
       new Audio('https://actions.google.com/sounds/v1/alarms/beep_short.ogg').play().catch(() => {});
       if (totalTime === customMinutes * 60 && user) {
-        const sessionLog = {
-          subjectName: focusGoal || 'Untitled Session',
-          duration: customMinutes,
-          timestamp: new Date().toISOString(),
-          lastUpdated: Date.now()
-        };
+        const sessionLog = { subjectName: focusGoal || 'Untitled Session', duration: customMinutes, timestamp: new Date().toISOString(), lastUpdated: Date.now() };
         push(ref(db, `users/${user.uid}/focusHistory`), sessionLog);
-
         const newDailyCount = sessionsToday + 1;
         const newTotalCount = sessionsCompleted + 1;
-        const newStats = {
-          total: newTotalCount,
-          today: newDailyCount,
-          lastDate: new Date().toLocaleDateString(),
-          lastUpdated: Date.now()
-        };
+        const newStats = { total: newTotalCount, today: newDailyCount, lastDate: new Date().toLocaleDateString(), lastUpdated: Date.now() };
         set(ref(db, `users/${user.uid}/stats`), newStats);
         saveToLocal(user.uid, 'stats', newStats);
-
         const updatedHistory = [...focusHistory, sessionLog];
         saveToLocal(user.uid, 'focusHistory', updatedHistory);
         setRecentFocusHistory(updatedHistory.slice(-3));
-        if (newDailyCount % 4 === 0) {
-          alert("4 Sessions Done! Take a long 15-minute break.");
-          setTotalTime(900); setSeconds(900);
-        } else {
-          alert("Session Complete! 5-minute break starts now.");
-          setTotalTime(300); setSeconds(300);
-        }
+        if (newDailyCount % 4 === 0) { alert("4 Sessions Done! Take a long 15-minute break."); setTotalTime(900); setSeconds(900); }
+        else { alert("Session Complete! 5-minute break starts now."); setTotalTime(300); setSeconds(300); }
       } else {
         alert("Break over! Ready to focus?");
         setTotalTime(customMinutes * 60);
@@ -647,41 +522,29 @@ Instructions:
       }
     }
     return () => clearInterval(interval);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [isActive, seconds, totalTime, sessionsToday, sessionsCompleted, focusGoal, customMinutes, user, focusHistory, saveToLocal]);
 
   const progressOffset = (2 * Math.PI * 140) - (seconds / totalTime) * (2 * Math.PI * 140);
 
-  // Updated getStatus uses the live `now` state
   const getStatus = useCallback((start, end) => {
     const currentTime = now || new Date();
     const [sH, sM] = start.split(':').map(Number);
     const [eH, eM] = end ? end.split(':').map(Number) : [sH + 1, sM];
-    const startDate = new Date(currentTime);
-    startDate.setHours(sH, sM, 0);
-    const endDate = new Date(currentTime);
-    endDate.setHours(eH, eM, 0);
+    const startDate = new Date(currentTime); startDate.setHours(sH, sM, 0);
+    const endDate = new Date(currentTime); endDate.setHours(eH, eM, 0);
     if (currentTime > endDate) return 'PAST';
     if (currentTime >= startDate && currentTime <= endDate) return 'LIVE';
     return 'UPCOMING';
   }, [now]);
 
   // ---------- CRUD OPERATIONS ----------
-  const clearForm = () => {
-    setSubject(''); setVenue(''); setStartTime(''); setEndTime(''); setDate(''); setDay('Monday'); setEditingId(null);
-  };
+  const clearForm = () => { setSubject(''); setVenue(''); setStartTime(''); setEndTime(''); setDate(''); setDay('Monday'); setEditingId(null); };
   const saveEntry = () => {
     if (!user || !subject || !startTime) return;
-    const entry = {
-      id: editingId || Date.now(),
-      subject, startTime, endTime, venue, day, date,
-      lastUpdated: Date.now()
-    };
+    const entry = { id: editingId || Date.now(), subject, startTime, endTime, venue, day, date, lastUpdated: Date.now() };
     let path = ttTab === 'LECTURES' ? 'lectures' : ttTab === 'REVISION' ? 'revisions' : 'exams';
     let currentList = ttTab === 'LECTURES' ? lectures : ttTab === 'REVISION' ? revisions : exams;
-    const updatedList = editingId
-      ? currentList.map(item => item.id === editingId ? entry : item)
-      : [entry, ...currentList];
+    const updatedList = editingId ? currentList.map(item => item.id === editingId ? entry : item) : [entry, ...currentList];
     if (ttTab === 'LECTURES') setLectures(updatedList);
     else if (ttTab === 'REVISION') setRevisions(updatedList);
     else setExams(updatedList);
@@ -711,10 +574,7 @@ Instructions:
   };
   const saveAcademic = () => {
     if(!user || !cwInput) return;
-    const newCw = {
-      id: Date.now(), text: cwInput, type: cwType, deadline: cwDeadline,
-      dueTime: cwDueTime, completed: false, lastUpdated: Date.now()
-    };
+    const newCw = { id: Date.now(), text: cwInput, type: cwType, deadline: cwDeadline, dueTime: cwDueTime, completed: false, lastUpdated: Date.now() };
     const updatedCoursework = [newCw, ...coursework];
     setCoursework(updatedCoursework);
     saveToLocal(user.uid, 'coursework', updatedCoursework);
@@ -752,7 +612,232 @@ Instructions:
     set(ref(db, `users/${user.uid}/tasks`), updated);
   };
 
-  // --- RENDER ---
+  // ========== SMART IMPORT STATE & LOGIC ==========
+  const [importCourse, setImportCourse] = useState('');
+  const [importYear, setImportYear] = useState('');
+  const [importFileText, setImportFileText] = useState('');
+  const [importFileName, setImportFileName] = useState('');
+  const [importResult, setImportResult] = useState([]);
+  const [isImporting, setIsImporting] = useState(false);
+  const [importError, setImportError] = useState('');
+  const [importTargetTab, setImportTargetTab] = useState('LECTURES');
+  const [uploadProgress, setUploadProgress] = useState(0); // new: file reading progress
+
+  // Chat state
+  const [chatMessages, setChatMessages] = useState([]);
+  const [chatInput, setChatInput] = useState('');
+  const [isChatLoading, setIsChatLoading] = useState(false);
+  const chatEndRef = useRef(null);
+  const fileInputRef = useRef(null);
+  const abortControllerRef = useRef(null); // new: for aborting fetch
+
+  useEffect(() => { chatEndRef.current?.scrollIntoView({ behavior: 'smooth' }); }, [chatMessages]);
+
+  const handleFileChange = (e) => {
+    const file = e.target.files[0];
+    if (!file) return;
+    setImportFileName(file.name);
+    setUploadProgress(0);
+    const reader = new FileReader();
+    reader.onprogress = (event) => {
+      if (event.lengthComputable) {
+        const percent = Math.round((event.loaded / event.total) * 100);
+        setUploadProgress(percent);
+      }
+    };
+    reader.onload = (event) => {
+      try {
+        const data = new Uint8Array(event.target.result);
+        const workbook = XLSX.read(data, { type: 'array' });
+        const firstSheet = workbook.SheetNames[0];
+        const csvText = XLSX.utils.sheet_to_csv(workbook.Sheets[firstSheet]);
+        setImportFileText(csvText);
+        setImportError('');
+        setUploadProgress(100); // complete
+        // Clear any existing chat when a new file is loaded
+        setChatMessages([]);
+        setImportResult([]);
+      } catch (err) {
+        console.error('File parse error:', err);
+        setImportError('Could not read the file. Please upload a valid Excel or CSV file.');
+        setImportFileText('');
+        setUploadProgress(0);
+      }
+    };
+    reader.onerror = () => {
+      setImportError('Error reading file.');
+      setUploadProgress(0);
+    };
+    reader.readAsArrayBuffer(file);
+  };
+
+  const runImport = async () => {
+    if (!importCourse || !importYear || !importFileText) {
+      setImportError('Please fill all fields and upload a file.');
+      return;
+    }
+    // Abort any previous request
+    if (abortControllerRef.current) {
+      abortControllerRef.current.abort();
+    }
+    const controller = new AbortController();
+    abortControllerRef.current = controller;
+    setIsImporting(true);
+    setImportError('');
+    setImportResult([]);
+    setChatMessages([]);
+    try {
+      const apiKey = process.env.REACT_APP_GEMINI_KEY;
+      const apiUrl = `/v1/models/gemini-2.5-flash:generateContent?key=${apiKey}`;
+      const prompt = `You are a university timetable assistant. Extract ONLY the classes that match:
+- Course: "${importCourse}"
+- Year: "${importYear}"
+
+For each class, return:
+- subject (string)
+${importTargetTab === 'EXAMS' ? '- date (YYYY-MM-DD)' : '- day (e.g., Monday, Tuesday)'}
+- startTime (HH:MM 24h)
+- endTime (HH:MM 24h)
+- lecturer (string, or "N/A")
+- room (string, or "N/A")
+
+Return ONLY a valid JSON array with those keys. No other text.
+
+Timetable data:
+${importFileText}`;
+
+      const response = await fetch(apiUrl, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ contents: [{ parts: [{ text: prompt }] }], generationConfig: { temperature: 0.1 } }),
+        signal: controller.signal
+      });
+      if (!response.ok) throw new Error(`API error: ${response.status}`);
+      const data = await response.json();
+      const raw = data.candidates?.[0]?.content?.parts?.[0]?.text?.trim();
+      if (!raw) throw new Error('Empty response from AI');
+      const match = raw.match(/\[[\s\S]*\]/);
+      if (!match) throw new Error('No JSON array found');
+      const parsed = JSON.parse(match[0]);
+      if (!Array.isArray(parsed)) throw new Error('Response is not an array');
+      setImportResult(parsed);
+      setChatMessages([
+        { role: 'system', content: `Imported timetable for ${importCourse} Year ${importYear} (${importTargetTab === 'EXAMS' ? 'Exams' : 'Lectures'}).` },
+        { role: 'assistant', content: `I've extracted ${parsed.length} classes. You can chat with me to refine the list.` }
+      ]);
+    } catch (err) {
+      if (err.name === 'AbortError') {
+        console.log('Import aborted by user');
+      } else {
+        console.error('Import error:', err);
+        setImportError('AI could not process the file. Please check the format.');
+      }
+    } finally {
+      setIsImporting(false);
+      abortControllerRef.current = null;
+    }
+  };
+
+  const addImportedLecture = (lecture) => {
+    if (!user) return;
+    const newEntry = {
+      id: Date.now(),
+      subject: lecture.subject,
+      startTime: lecture.startTime,
+      endTime: lecture.endTime,
+      venue: lecture.room || 'N/A',
+      lastUpdated: Date.now()
+    };
+    if (importTargetTab === 'EXAMS') {
+      newEntry.date = lecture.date || '';
+      const updatedExams = [newEntry, ...exams];
+      setExams(updatedExams);
+      saveToLocal(user.uid, 'exams', updatedExams);
+      set(ref(db, `users/${user.uid}/exams`), updatedExams);
+    } else {
+      newEntry.day = lecture.day || 'Monday';
+      const updatedLectures = [newEntry, ...lectures];
+      setLectures(updatedLectures);
+      saveToLocal(user.uid, 'lectures', updatedLectures);
+      set(ref(db, `users/${user.uid}/lectures`), updatedLectures);
+    }
+    // Remove the card from the import list
+    setImportResult(prev => prev.filter(l => l !== lecture));
+  };
+
+  const removeImportedClass = (index) => {
+    setImportResult(prev => prev.filter((_, i) => i !== index));
+  };
+
+  const clearFile = () => {
+    // Abort any ongoing AI request
+    if (abortControllerRef.current) {
+      abortControllerRef.current.abort();
+      abortControllerRef.current = null;
+    }
+    setIsImporting(false);
+    setImportFileText('');
+    setImportFileName('');
+    setImportError('');
+    setUploadProgress(0);
+    if (fileInputRef.current) fileInputRef.current.value = '';
+    // Optionally clear import results and chat
+    setImportResult([]);
+    setChatMessages([]);
+  };
+
+  const sendChatMessage = async () => {
+    if (!chatInput.trim()) return;
+    const newUserMessage = { role: 'user', content: chatInput.trim() };
+    const updatedMessages = [...chatMessages, newUserMessage];
+    setChatMessages(updatedMessages);
+    setChatInput('');
+    setIsChatLoading(true);
+    try {
+      const apiKey = process.env.REACT_APP_GEMINI_KEY;
+      const apiUrl = `/v1/models/gemini-2.5-flash:generateContent?key=${apiKey}`;
+      let contextText = `Current extracted classes:\n${JSON.stringify(importResult, null, 2)}\n\nUser request: ${newUserMessage.content}`;
+      const isAdding = /add|find|missing|check (again|file)|re-?scan|search for|look for|extract (more|another)|forgot|missed/i.test(newUserMessage.content);
+      if (isAdding && importFileText) {
+        contextText += `\n\nFull Timetable Data (use this to find any missing classes):\n${importFileText}`;
+      }
+      const contextMessage = { role: 'user', parts: [{ text: contextText }] };
+      const historyContents = updatedMessages.slice(0, -1).map(msg => ({
+        role: msg.role === 'assistant' ? 'model' : 'user',
+        parts: [{ text: msg.content }]
+      }));
+      const systemInstruction = {
+        role: 'user',
+        parts: [{ text: `You are a helpful timetable assistant. When asked to add or remove classes, respond with the updated full JSON array of all classes (including those not mentioned). The array must be valid JSON. Each object must have: subject, ${importTargetTab === 'EXAMS' ? 'date (YYYY-MM-DD)' : 'day'}, startTime (HH:MM), endTime (HH:MM), lecturer, room. If the user asks something else, answer conversationally.` }]
+      };
+      const contents = [systemInstruction, ...historyContents, contextMessage];
+      const response = await fetch(apiUrl, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ contents, generationConfig: { temperature: 0.2 } })
+      });
+      if (!response.ok) throw new Error(`API error: ${response.status}`);
+      const data = await response.json();
+      const reply = data.candidates?.[0]?.content?.parts?.[0]?.text?.trim() || 'No response.';
+      const jsonMatch = reply.match(/\[[\s\S]*\]/);
+      if (jsonMatch) {
+        try {
+          const updated = JSON.parse(jsonMatch[0]);
+          if (Array.isArray(updated) && updated.length > 0) {
+            setImportResult(updated);
+            setChatMessages(prev => [...prev, { role: 'assistant', content: `I've updated your timetable.` }]);
+            return;
+          }
+        } catch {}
+      }
+      setChatMessages(prev => [...prev, { role: 'assistant', content: reply }]);
+    } catch (error) { setChatMessages(prev => [...prev, { role: 'assistant', content: 'Sorry, something went wrong.' }]); }
+    finally { setIsChatLoading(false); }
+  };
+
+  const clearChatHistory = () => { setChatMessages([]); };
+
+  // --- RENDER --- (authLoading / login unchanged)
   if (authLoading) {
     return (
       <div className="auth-loading">
@@ -760,50 +845,12 @@ Instructions:
         <h1 className="loading-logo">FOCUS FLOW</h1>
         <p className="loading-subtext">LOADING...</p>
         <style>{`
-          .auth-loading {
-            min-height: 100vh;
-            display: flex;
-            flex-direction: column;
-            align-items: center;
-            justify-content: center;
-            background: radial-gradient(circle at 50% 30%, #0a1a1a, #000);
-          }
-          .loading-spinner {
-            width: 60px;
-            height: 60px;
-            border: 4px solid rgba(0, 255, 249, 0.2);
-            border-top: 4px solid #00fff9;
-            border-radius: 50%;
-            animation: spin 1s linear infinite;
-            margin-bottom: 30px;
-            box-shadow: 0 0 15px #00fff9;
-          }
-          .loading-logo {
-            font-size: 2.5rem;
-            font-weight: 900;
-            color: #00fff9;
-            letter-spacing: 2px;
-            text-shadow: 0 0 15px #00fff9, 0 0 30px #00fff9;
-            animation: pulse 1.5s ease-in-out infinite;
-            margin: 0;
-          }
-          .loading-subtext {
-            margin-top: 15px;
-            font-size: 0.9rem;
-            color: #00fff9;
-            letter-spacing: 4px;
-            animation: pulse 1.5s ease-in-out infinite;
-            opacity: 0.8;
-          }
-          @keyframes spin {
-            0% { transform: rotate(0deg); }
-            100% { transform: rotate(360deg); }
-          }
-          @keyframes pulse {
-            0% { opacity: 0.5; text-shadow: 0 0 10px #00fff9; }
-            50% { opacity: 1; text-shadow: 0 0 20px #00fff9, 0 0 30px #00fff9; }
-            100% { opacity: 0.5; text-shadow: 0 0 10px #00fff9; }
-          }
+          .auth-loading { min-height: 100vh; display: flex; flex-direction: column; align-items: center; justify-content: center; background: radial-gradient(circle at 50% 30%, #0a1a1a, #000); }
+          .loading-spinner { width: 60px; height: 60px; border: 4px solid rgba(0, 255, 249, 0.2); border-top: 4px solid #00fff9; border-radius: 50%; animation: spin 1s linear infinite; margin-bottom: 30px; box-shadow: 0 0 15px #00fff9; }
+          .loading-logo { font-size: 2.5rem; font-weight: 900; color: #00fff9; letter-spacing: 2px; text-shadow: 0 0 15px #00fff9, 0 0 30px #00fff9; animation: pulse 1.5s ease-in-out infinite; margin: 0; }
+          .loading-subtext { margin-top: 15px; font-size: 0.9rem; color: #00fff9; letter-spacing: 4px; animation: pulse 1.5s ease-in-out infinite; opacity: 0.8; }
+          @keyframes spin { 0% { transform: rotate(0deg); } 100% { transform: rotate(360deg); } }
+          @keyframes pulse { 0% { opacity: 0.5; text-shadow: 0 0 10px #00fff9; } 50% { opacity: 1; text-shadow: 0 0 20px #00fff9, 0 0 30px #00fff9; } 100% { opacity: 0.5; text-shadow: 0 0 10px #00fff9; } }
         `}</style>
       </div>
     );
@@ -827,12 +874,8 @@ Instructions:
             {authMode === 'signup' && (
               <>
                 <div className="password-checklist">
-                  <p style={{ color: passwordLongEnough ? '#00fff9' : '#555' }}>
-                    {passwordLongEnough ? '✓' : '○'} At least 6 characters
-                  </p>
-                  <p style={{ color: passwordHasNumber ? '#00fff9' : '#555' }}>
-                    {passwordHasNumber ? '✓' : '○'} At least one number
-                  </p>
+                  <p style={{ color: passwordLongEnough ? '#00fff9' : '#555' }}>{passwordLongEnough ? '✓' : '○'} At least 6 characters</p>
+                  <p style={{ color: passwordHasNumber ? '#00fff9' : '#555' }}>{passwordHasNumber ? '✓' : '○'} At least one number</p>
                 </div>
                 <div className="password-wrapper">
                   <input type={showConfirmPassword ? 'text' : 'password'} placeholder="Confirm Password" value={authConfirmPassword} onChange={(e) => setAuthConfirmPassword(e.target.value)} className="auth-input" autoComplete="new-password" />
@@ -841,15 +884,11 @@ Instructions:
               </>
             )}
             {authError && <div className="auth-error">{authError}</div>}
-            <button type="submit" className="auth-submit-btn" disabled={authMode === 'signup' && !isSignupValid()}>
-              {authMode === 'signup' ? 'CREATE ACCOUNT' : 'SIGN IN'}
-            </button>
+            <button type="submit" className="auth-submit-btn" disabled={authMode === 'signup' && !isSignupValid()}>{authMode === 'signup' ? 'CREATE ACCOUNT' : 'SIGN IN'}</button>
           </form>
           <p className="auth-switch-text">
             {authMode === 'login' ? "Don't have an account? " : "Already have an account? "}
-            <button onClick={() => setAuthMode(authMode === 'login' ? 'signup' : 'login')}>
-              {authMode === 'login' ? 'Sign Up' : 'Login'}
-            </button>
+            <button onClick={() => setAuthMode(authMode === 'login' ? 'signup' : 'login')}>{authMode === 'login' ? 'Sign Up' : 'Login'}</button>
           </p>
         </div>
         <style>{`
@@ -904,7 +943,7 @@ Instructions:
       </header>
 
       <main className="content">
-        {/* Home screen */}
+        {/* HOME, TIMETABLE, AI_GEN, IMPORT_TIMETABLE, ACADEMIC, TASKS, FOCUS screens */}
         {currentScreen === 'HOME' && (
           <div className="magic-flow-container">
             <h4 className="section-label">TODAY'S FLOW ({todayName.toUpperCase()})</h4>
@@ -918,16 +957,13 @@ Instructions:
                     <span className="flow-time">{item.startTime} - {item.endTime || '--:--'}</span>
                     <h3 className="flow-subject">{item.subject.toUpperCase()}</h3>
                     <span className="flow-venue">{item.venue || 'No Venue'}</span>
-                    {item.category === 'TEST' && item.dueTime && (
-                      <span className="test-due-badge">Due: {item.dueTime}</span>
-                    )}
+                    {item.category === 'TEST' && item.dueTime && (<span className="test-due-badge">Due: {item.dueTime}</span>)}
                   </div>
                 );
             })}
           </div>
         )}
 
-        {/* Timetable screen */}
         {currentScreen === 'TIMETABLE' && (
           <div className="center-view">
             <div className="tab-pill">
@@ -937,6 +973,11 @@ Instructions:
             </div>
             {ttTab === 'REVISION' && (
               <button className="ai-gen-btn" onClick={() => setCurrentScreen('AI_GEN')}>✨ GENERATE WITH AI</button>
+            )}
+            {ttTab !== 'REVISION' && (
+              <button className="ai-gen-btn" onClick={() => { setImportTargetTab(ttTab); setCurrentScreen('IMPORT_TIMETABLE'); }}>
+                📤 IMPORT FROM GENERAL TIMETABLE
+              </button>
             )}
             <div className="form-container">
               <h4 className="input-header">{editingId ? 'EDIT' : 'ADD NEW'} {ttTab}</h4>
@@ -971,33 +1012,22 @@ Instructions:
           </div>
         )}
 
-        {/* AI screen */}
         {currentScreen === 'AI_GEN' && (
           <div className="center-view">
-            <button className="back-btn" onClick={() => setCurrentScreen('TIMETABLE')} style={{ alignSelf: 'flex-start', marginBottom: '10px' }}>
-              ← Back to Schedule
-            </button>
+            <button className="back-btn" onClick={() => setCurrentScreen('TIMETABLE')} style={{ alignSelf: 'flex-start', marginBottom: '10px' }}>← Back to Schedule</button>
             <h4 className="section-label">GENERATE WITH AI</h4>
             {!isGenerating && recommendations.length === 0 && (
               <div className="ai-intro-card">
-                <p style={{color: '#aaa', marginBottom: '20px'}}>
-                  Let AI analyse your schedule, deadlines, and study habits to suggest perfect revision slots for today.
-                </p>
-                <button className="ai-gen-btn" onClick={generateRecommendations}>
-                  🚀 GENERATE REVISION TIMETABLE
-                </button>
+                <p style={{color: '#aaa', marginBottom: '20px'}}>Let AI analyse your schedule, deadlines, and study habits to suggest perfect revision slots for today.</p>
+                <button className="ai-gen-btn" onClick={generateRecommendations}>🚀 GENERATE REVISION TIMETABLE</button>
               </div>
             )}
             {isGenerating && (
               <div className="scanning-animation card-styled">
                 <div className="pulse-icon">🧠</div>
                 <div className="shimmer-text">Generating Revision Timetable...</div>
-                <div className="progress-bar">
-                  <div className="progress-fill shimmer"></div>
-                </div>
-                <p style={{color: '#666', fontSize: '0.7rem', marginTop: '15px'}}>
-                  Analysing free slots, deadlines, and focus history...
-                </p>
+                <div className="progress-bar"><div className="progress-fill shimmer"></div></div>
+                <p style={{color: '#666', fontSize: '0.7rem', marginTop: '15px'}}>Analysing free slots, deadlines, and focus history...</p>
               </div>
             )}
             {!isGenerating && recommendations.length > 0 && (
@@ -1014,28 +1044,145 @@ Instructions:
                     <button className="rec-add-btn" onClick={() => handleAddRecommendation(rec)}>+</button>
                   </div>
                 ))}
-                <button className="cancel-btn" onClick={generateRecommendations} style={{marginTop: '20px'}}>
-                  🔄 Regenerate
-                </button>
+                <button className="cancel-btn" onClick={generateRecommendations} style={{marginTop: '20px'}}>🔄 Regenerate</button>
               </div>
             )}
           </div>
         )}
 
-        {/* Coursework screen */}
+        {currentScreen === 'IMPORT_TIMETABLE' && (
+          <div className="center-view">
+            <button className="back-btn" onClick={() => setCurrentScreen('TIMETABLE')}>← Back to Timetable</button>
+            <h4 className="section-label">IMPORT FROM TIMETABLE ({importTargetTab === 'EXAMS' ? 'Exams' : 'Lectures'})</h4>
+            <div className="form-container">
+              <div className="input-group"><label>YOUR COURSE</label><input placeholder="e.g. Bachelor of Information Technology" value={importCourse} onChange={e => setImportCourse(e.target.value)} className="neon-input" /></div>
+              <div className="input-group"><label>YOUR YEAR</label><input placeholder="e.g. Year 2" value={importYear} onChange={e => setImportYear(e.target.value)} className="neon-input" /></div>
+              <div className="input-group">
+                <label>UPLOAD TIMETABLE FILE (CSV / EXCEL)</label>
+                {/* Redesigned upload zone */}
+                <div
+                  className="upload-zone"
+                  onClick={() => fileInputRef.current && fileInputRef.current.click()}
+                  style={{
+                    border: '2px dashed rgba(0, 255, 249, 0.4)',
+                    borderRadius: '12px',
+                    padding: '20px',
+                    textAlign: 'center',
+                    cursor: 'pointer',
+                    background: 'rgba(0, 255, 249, 0.03)',
+                    transition: 'all 0.2s',
+                    marginBottom: '15px'
+                  }}
+                  onMouseOver={(e) => e.currentTarget.style.borderColor = 'var(--neon)'}
+                  onMouseOut={(e) => e.currentTarget.style.borderColor = 'rgba(0, 255, 249, 0.4)'}
+                >
+                  <span style={{ fontSize: '2rem' }}>📎</span>
+                  <p style={{ color: '#aaa', margin: '10px 0 0' }}>
+                    {importFileName ? importFileName : 'Click to choose timetable file (.xlsx, .csv)'}
+                  </p>
+                </div>
+                <input
+                  type="file"
+                  accept=".csv,.xlsx,.xls"
+                  onChange={handleFileChange}
+                  ref={fileInputRef}
+                  style={{ display: 'none' }}
+                />
+                {/* Upload progress bar */}
+                {uploadProgress > 0 && !isImporting && (
+                  <div className="progress-bar" style={{ marginBottom: '15px' }}>
+                    <div className="progress-fill" style={{ width: `${uploadProgress}%`, background: 'var(--neon)', height: '100%', borderRadius: '2px', transition: 'width 0.3s' }}></div>
+                  </div>
+                )}
+                {importFileName && !isImporting && (
+                  <div style={{ display: 'flex', justifyContent: 'flex-end', marginBottom: '10px' }}>
+                    <button onClick={clearFile} style={{ background: 'rgba(255,0,0,0.1)', border: '1px solid #f44', color: '#f44', borderRadius: '8px', padding: '6px 12px', cursor: 'pointer', fontWeight: 'bold', fontSize: '0.8rem' }}>✕</button>
+                  </div>
+                )}
+              </div>
+              {/* Import button or animated state */}
+              {isImporting ? (
+                <div className="ai-analysing" style={{
+                  background: 'linear-gradient(90deg, #7000ff, #00fff9, #ff00ea)',
+                  backgroundSize: '200% 200%',
+                  animation: 'aiPulse 2s ease infinite',
+                  WebkitBackgroundClip: 'text',
+                  WebkitTextFillColor: 'transparent',
+                  backgroundClip: 'text',
+                  textFillColor: 'transparent',
+                  fontSize: '1.1rem',
+                  fontWeight: 'bold',
+                  textAlign: 'center',
+                  padding: '15px 0',
+                  marginBottom: '15px'
+                }}>
+                  AI is reading your timetable...
+                </div>
+              ) : (
+                <button className="action-btn main" onClick={runImport} disabled={!importFileText}>
+                  🚀 IMPORT TIMETABLE
+                </button>
+              )}
+              {importError && <p style={{ color: '#f44', marginTop: '10px', textAlign: 'center' }}>{importError}</p>}
+            </div>
+
+            {importResult.length > 0 && (
+              <>
+                <div className="recommendations-container" style={{ marginTop: '20px' }}>
+                  <h4 className="section-label">EXTRACTED CLASSES ({importResult.length})</h4>
+                  {importResult.map((entry, idx) => (
+                    <div key={idx} className="recommendation-card neon-card" style={{ padding: '10px 15px', paddingTop: '10px' }}>
+                      <div className="rec-header" style={{ marginBottom: '5px' }}>
+                        <span className="rec-subject" style={{ fontSize: '1rem' }}>{entry.subject}</span>
+                        <span className="rec-time" style={{ fontSize: '0.7rem' }}>
+                          {importTargetTab === 'EXAMS' ? (entry.date || 'No date') : entry.day} {entry.startTime} – {entry.endTime}
+                        </span>
+                      </div>
+                      <div className="rec-details" style={{ display: 'flex', gap: '15px', fontSize: '0.7rem', color: '#aaa', marginTop: '3px' }}>
+                        <span>👨‍🏫 {entry.lecturer || 'N/A'}</span>
+                        <span>🏫 {entry.room || 'N/A'}</span>
+                      </div>
+                      <div style={{ display: 'flex', gap: '10px', marginTop: '8px', justifyContent: 'flex-end' }}>
+                        <button onClick={() => removeImportedClass(idx)} style={{ background: 'transparent', border: '2px solid #f44', color: '#f44', width: '36px', height: '36px', borderRadius: '50%', fontSize: '1.3rem', fontWeight: 'bold', cursor: 'pointer', display: 'flex', alignItems: 'center', justifyContent: 'center', transition: 'all 0.2s' }}
+                          onMouseOver={(e) => { e.target.style.background = '#f44'; e.target.style.color = '#000'; }}
+                          onMouseOut={(e) => { e.target.style.background = 'transparent'; e.target.style.color = '#f44'; }}>
+                          ✕
+                        </button>
+                        <button className="rec-add-btn" style={{ width: '36px', height: '36px', fontSize: '1.5rem' }} onClick={() => addImportedLecture(entry)}>+</button>
+                      </div>
+                    </div>
+                  ))}
+                </div>
+
+                <div className="chat-container" style={{ marginTop: '30px' }}>
+                  <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+                    <h4 className="section-label" style={{ margin: 0 }}>CHAT WITH AI</h4>
+                    <button className="cancel-btn" style={{ width: 'auto', padding: '4px 12px', fontSize: '0.7rem' }} onClick={clearChatHistory}>🗑️ Clear Chat</button>
+                  </div>
+                  <div className="chat-messages" style={{ maxHeight: '300px', overflowY: 'auto', padding: '10px', background: 'rgba(0,0,0,0.3)', borderRadius: '12px', marginBottom: '10px', display: 'flex', flexDirection: 'column' }}>
+                    {chatMessages.filter(m => m.role !== 'system').map((msg, idx) => (
+                      <div key={idx} style={{ margin: '8px 0', alignSelf: msg.role === 'user' ? 'flex-end' : 'flex-start', maxWidth: '80%' }}>
+                        <span style={{ background: msg.role === 'user' ? 'var(--neon)' : '#333', color: msg.role === 'user' ? '#000' : '#fff', padding: '8px 14px', borderRadius: '12px', display: 'inline-block' }}>{msg.content}</span>
+                      </div>
+                    ))}
+                    {isChatLoading && <p style={{ color: '#888' }}>AI thinking...</p>}
+                    <div ref={chatEndRef} />
+                  </div>
+                  <div style={{ display: 'flex', gap: '10px' }}>
+                    <input placeholder="Ask AI to add/remove classes..." value={chatInput} onChange={e => setChatInput(e.target.value)} onKeyPress={e => e.key === 'Enter' && sendChatMessage()} className="neon-input" style={{ flex: 1 }} />
+                    <button onClick={sendChatMessage} className="add-btn" disabled={isChatLoading}>➤</button>
+                  </div>
+                </div>
+              </>
+            )}
+          </div>
+        )}
+
         {currentScreen === 'ACADEMIC' && (
           <div className="center-view">
             <h4 className="section-label">COURSEWORK</h4>
             <div className="form-container" style={{marginBottom: '25px'}}>
-              <div className="input-group">
-                <label>TYPE</label>
-                <select value={cwType} onChange={e => setCwType(e.target.value)} className="neon-input">
-                  <option>Assignment</option>
-                  <option>Coursework</option>
-                  <option>Test</option>
-                  <option>Discussion</option>
-                </select>
-              </div>
+              <div className="input-group"><label>TYPE</label><select value={cwType} onChange={e => setCwType(e.target.value)} className="neon-input"><option>Assignment</option><option>Coursework</option><option>Test</option><option>Discussion</option></select></div>
               <div className="row" style={{gap: '10px'}}>
                 <div className="input-group flex-1"><label>DEADLINE DATE</label><input type="date" value={cwDeadline} onChange={e => setCwDeadline(e.target.value)} className="neon-input date-picker" /></div>
                 <div className="input-group flex-1"><label>DUE TIME</label><input type="time" value={cwDueTime} onChange={e => setCwDueTime(e.target.value)} className="neon-input time-picker" /></div>
@@ -1061,7 +1208,6 @@ Instructions:
           </div>
         )}
 
-        {/* Tasks screen */}
         {currentScreen === 'TASKS' && (
           <div className="center-view">
             <h4 className="section-label">DAILY TASKS</h4>
@@ -1084,7 +1230,6 @@ Instructions:
           </div>
         )}
 
-        {/* Focus screen */}
         {currentScreen === 'FOCUS' && (
           <div className="center-view timer-screen">
             {!isActive && seconds === totalTime ? (
@@ -1119,9 +1264,7 @@ Instructions:
             </div>
 
             <div className="timer-controls">
-              <button className={`timer-btn start ${isActive ? 'pause' : ''}`} onClick={() => {if(!isActive && !focusGoal && totalTime === customMinutes * 60) { alert("Please enter a focus goal first!"); return; } setIsActive(!isActive);}}>
-                {isActive ? 'PAUSE' : (seconds < totalTime ? 'RESUME' : 'START SESSION')}
-              </button>
+              <button className={`timer-btn start ${isActive ? 'pause' : ''}`} onClick={() => {if(!isActive && !focusGoal && totalTime === customMinutes * 60) { alert("Please enter a focus goal first!"); return; } setIsActive(!isActive);}}>{isActive ? 'PAUSE' : (seconds < totalTime ? 'RESUME' : 'START SESSION')}</button>
               <button className="timer-btn restart" onClick={() => {setIsActive(false); setTotalTime(customMinutes * 60); setSeconds(customMinutes * 60);}}>RESET</button>
             </div>
 
@@ -1131,9 +1274,7 @@ Instructions:
             </div>
 
             <div className="history-toggle-wrapper">
-              <button className="history-toggle-btn" onClick={() => setShowHistory(!showHistory)}>
-                {showHistory ? 'Hide' : 'View'} Recent Sessions
-              </button>
+              <button className="history-toggle-btn" onClick={() => setShowHistory(!showHistory)}>{showHistory ? 'Hide' : 'View'} Recent Sessions</button>
             </div>
 
             {showHistory && (
@@ -1158,7 +1299,7 @@ Instructions:
 
       <nav className="nav-bar">
         <button onClick={() => setCurrentScreen('HOME')} className={currentScreen === 'HOME' ? 'active' : ''}>🏠<span>Home</span></button>
-        <button onClick={() => setCurrentScreen('TIMETABLE')} className={currentScreen === 'TIMETABLE' || currentScreen === 'AI_GEN' ? 'active' : ''}>📅<span>Timetables</span></button>
+        <button onClick={() => setCurrentScreen('TIMETABLE')} className={currentScreen === 'TIMETABLE' || currentScreen === 'AI_GEN' || currentScreen === 'IMPORT_TIMETABLE' ? 'active' : ''}>📅<span>Timetables</span></button>
         <button onClick={() => setCurrentScreen('ACADEMIC')} className={currentScreen === 'ACADEMIC' ? 'active' : ''}>📄<span>Coursework</span></button>
         <button onClick={() => setCurrentScreen('TASKS')} className={currentScreen === 'TASKS' ? 'active' : ''}>✅<span>Tasks</span></button>
         <button onClick={() => setCurrentScreen('FOCUS')} className={currentScreen === 'FOCUS' ? 'active' : ''}>⏱️<span>Focus</span></button>
@@ -1179,6 +1320,28 @@ Instructions:
         .progress-fill { height: 100%; width: 30%; background: linear-gradient(90deg, transparent, var(--neon), transparent); animation: shimmerMove 1.5s infinite; }
         @keyframes pulse { 0% { opacity: 0.5; transform: scale(1); } 50% { opacity: 1; transform: scale(1.1); text-shadow: 0 0 15px var(--neon); } 100% { opacity: 0.5; transform: scale(1); } }
         @keyframes shimmerMove { 0% { transform: translateX(-100%); } 100% { transform: translateX(400%); } }
+        /* New AI analysing animation */
+        @keyframes aiPulse {
+          0% { background-position: 0% 50%; opacity: 0.8; }
+          50% { background-position: 100% 50%; opacity: 1; }
+          100% { background-position: 0% 50%; opacity: 0.8; }
+        }
+        .ai-analysing {
+          animation: aiPulse 2s ease infinite;
+          font-size: 1.1rem;
+          font-weight: bold;
+          text-align: center;
+          padding: 15px 0;
+          margin-bottom: 15px;
+          background: linear-gradient(90deg, #7000ff, #00fff9, #ff00ea);
+          background-size: 200% 200%;
+          -webkit-background-clip: text;
+          -webkit-text-fill-color: transparent;
+          background-clip: text;
+          text-fill-color: transparent;
+        }
+        .upload-zone { transition: all 0.2s; }
+        .upload-zone:hover { border-color: var(--neon) !important; }
         .recommendations-container { margin-top: 10px; }
         .recommendation-card { padding: 20px; padding-top: 30px; margin-bottom: 15px; text-align: left; display: flex; flex-direction: column; position: relative; }
         .neon-card { background: rgba(0, 0, 0, 0.6) !important; border: 2px solid var(--neon) !important; box-shadow: 0 0 20px rgba(0, 255, 249, 0.3), inset 0 0 10px rgba(0, 255, 249, 0.1); backdrop-filter: blur(12px); transition: all 0.3s ease; border-radius: 20px !important; }
@@ -1191,6 +1354,9 @@ Instructions:
         .rec-reasoning { font-size: 0.8rem; color: #ccc; margin-bottom: 15px; line-height: 1.4; }
         .rec-add-btn { background: transparent; border: 2px solid var(--neon); color: var(--neon); width: 40px; height: 40px; border-radius: 50%; font-size: 1.8rem; font-weight: 300; display: flex; align-items: center; justify-content: center; cursor: pointer; margin-left: auto; transition: all 0.2s; }
         .rec-add-btn:hover { background: var(--neon); color: #000; box-shadow: 0 0 20px var(--neon); }
+        .chat-container { margin-top: 20px; }
+        .chat-messages::-webkit-scrollbar { width: 4px; }
+        .chat-messages::-webkit-scrollbar-thumb { background: var(--neon); border-radius: 2px; }
         .test-due-badge { display: block; font-size: 0.65rem; color: var(--exam); font-weight: 800; margin-top: 5px; }
         .cat-test .flow-category-tag { background: #e67e22; color: #000; }
         .flow-card-new, .task-card, .card-styled, .manage-item, .form-container { background: rgba(255, 255, 255, 0.03); border: 1px solid rgba(255, 255, 255, 0.08); backdrop-filter: blur(8px); -webkit-backdrop-filter: blur(8px); }
