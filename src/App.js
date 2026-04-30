@@ -194,7 +194,7 @@ function App() {
     }
   }, []);
 
-  // ========== AUDIO UNLOCK ==========
+  // ========== AUDIO UNLUCK ==========
   const unlockAudio = useCallback(() => {
     const silent = new Audio('data:audio/wav;base64,UklGRigAAABXQVZFZm10IBIAAAABAAEARKwAAIhYAQACABAAAABkYXRhAgAAAAEA');
     silent.play().then(() => {}).catch(() => {});
