@@ -1,4 +1,7 @@
-.App {
+/** * FocusFlow Global App Shell
+ * Standard React Boilerplate Reset
+ */
+ .App {
   text-align: center;
 }
 
@@ -29,33 +32,23 @@
 }
 
 @keyframes App-logo-spin {
-  from {
-    transform: rotate(0deg);
-  }
-  to {
-    transform: rotate(360deg);
-  }
+  from { transform: rotate(0deg); }
+  to { transform: rotate(360deg); }
 }
 
+/* ---------------------------------------------------------
+   FEATURE: THE DAILY FLOW TIMELINE
+   Architectural Logic: Implements a pseudo-element vertical track
+   to provide visual continuity for the student's daily schedule.
+   --------------------------------------------------------- */
 
-
-
-
-
-
-
-
-
-
-/* --- THE FLOW PAGE MAGIC --- */
-/* This container holds everything on the Home tab */
 .magic-flow-container {
   padding: 10px 20px;
   position: relative;
-  text-align: left; /* Ensures text doesn't inherit the center-align from .App */
+  text-align: left; 
 }
 
-/* The Glowing Vertical Timeline Line */
+/* Timeline Track: Gradient used to simulate depth and 'active' state */
 .magic-flow-container::before {
   content: '';
   position: absolute;
@@ -71,7 +64,9 @@
   z-index: 0;
 }
 
-/* Base style for every card on the Flow page */
+/* Component: Base Flow Card
+   Utilizing cubic-bezier for a more 'organic' feel on hover interactions.
+*/
 .flow-card-new {
   position: relative;
   background: #0a0a0a;
@@ -79,20 +74,25 @@
   border-radius: 20px;
   padding: 20px;
   margin-bottom: 20px;
-  margin-left: 35px; /* Pushes card right to show the timeline line */
+  margin-left: 35px; 
   z-index: 1;
   transition: all 0.4s cubic-bezier(0.175, 0.885, 0.32, 1.275);
 }
 
-/* LIVE CARD: The one with the neon glow and scanline */
+/* State: Live Component
+   Logic: Emphasizes the current task using a secondary background gradient
+   and a subtle scale transformation to guide user attention.
+*/
 .flow-card-new.live {
   border: 1px solid #00ffff;
   box-shadow: 0 0 20px rgba(0, 255, 255, 0.15);
   background: linear-gradient(145deg, #0a0a0a 0%, #001a1a 100%);
-  transform: scale(1.02); /* Makes it pop slightly */
+  transform: scale(1.02); 
 }
 
-/* The "Scanline" animation that moves down the Live card */
+/* Visualization: Scanline Overlay
+   Simulates a 'live processing' effect via linear translation.
+*/
 .flow-card-new.live::after {
   content: '';
   position: absolute;
@@ -103,19 +103,19 @@
   pointer-events: none;
 }
 
-/* PAST CARDS: Dimmed out to focus on the present */
+/* State: Inactive/Historical
+   Visual Hierarchy: De-emphasizing completed tasks to reduce cognitive load.
+*/
 .flow-card-new.past {
   opacity: 0.35;
   filter: grayscale(1);
 }
 
-/* ANIMATIONS */
 @keyframes flow-scan {
   0% { transform: translateY(-100%); }
   100% { transform: translateY(100%); }
 }
 
-/* The Status Badge (LIVE, PAST, UPCOMING) */
 .magic-badge {
   float: right;
   font-size: 0.6rem;
@@ -134,32 +134,24 @@
   box-shadow: 0 0 10px #00ffff;
 }
 
+/* ---------------------------------------------------------
+   FEATURE: POMODORO POWER CORE
+   UI Logic: SVG-based progress tracking with dynamic stroking.
+   --------------------------------------------------------- */
 
-
-
-
-
-
-
-
-
-
-
-
-
-/* --- TIMER POWER CORE MAGIC --- */
 .timer-container {
   position: relative;
   filter: drop-shadow(0 0 10px rgba(0, 242, 254, 0.2));
 }
 
-/* This makes the neon ring "breathe" when active */
+/* Visual Cue: Breathing Pulse
+   Logic: Provides haptic-like visual feedback that the system is active.
+*/
 .timer-active .timer-progress {
   animation: timer-pulse 2s ease-in-out infinite;
-  stroke-width: 10; /* Slightly thicker when running */
+  stroke-width: 10; 
 }
 
-/* The neon liquid effect */
 .timer-progress {
   stroke-linecap: round;
   filter: drop-shadow(0 0 8px var(--neon));
@@ -172,9 +164,8 @@
   100% { opacity: 1; filter: drop-shadow(0 0 8px var(--neon)); }
 }
 
-/* Making the numbers pop */
 .timer-val {
   text-shadow: 0 0 20px rgba(0, 242, 254, 0.4);
-  font-family: 'JetBrains Mono', monospace; /* If you have it, looks very techy */
+  font-family: 'JetBrains Mono', monospace; 
   letter-spacing: -2px;
 }

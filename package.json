@@ -1,20 +1,19 @@
 {
   "name": "focus-flow",
-  "version": "0.1.0",
+  "version": "1.0.0",
   "private": true,
-  "proxy": "https://generativelanguage.googleapis.com",
   "dependencies": {
-    "@testing-library/dom": "^10.4.1",
-    "@testing-library/jest-dom": "^6.9.1",
-    "@testing-library/react": "^16.3.2",
-    "@testing-library/user-event": "^13.5.0",
     "firebase": "^12.12.0",
     "openai": "^6.34.0",
     "react": "^19.2.4",
     "react-dom": "^19.2.4",
     "react-scripts": "5.0.1",
+    "xlsx": "^0.18.5",
     "web-vitals": "^2.1.4",
-    "xlsx": "^0.18.5"
+    "@testing-library/dom": "^10.4.1",
+    "@testing-library/jest-dom": "^6.9.1",
+    "@testing-library/react": "^16.3.2",
+    "@testing-library/user-event": "^13.5.0"
   },
   "scripts": {
     "start": "react-scripts start",

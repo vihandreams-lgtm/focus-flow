@@ -1,12 +1,24 @@
-// public/sw.js
+/**
+ * FocusFlow Service Worker (PWA Core)
+ * Version: 2.0.0
+ * * Objectives:
+ * 1. Implement Resource Caching for Offline Availability.
+ * 2. Manage Asynchronous Background Notifications via IndexedDB.
+ * 3. Handle Edge-Case Fetching to ensure API reliability.
+ */
 
 const CACHE_NAME = 'focusflow-v2';
 const DB_NAME = 'focusflow-notif-db';
 const DB_VERSION = 1;
 const STORE_NAME = 'notifications';
-let timers = [];  // store active timers to clear on update
+let timers = [];
 
-// ------ IndexedDB helpers (unchanged) ------
+/* --- LOCAL PERSISTENCE LAYER (IndexedDB) --- */
+
+/**
+ * Initializes the IndexedDB store for client-side notification queuing.
+ * This allows the app to schedule alerts without an active internet connection.
+ */
 function openDB() {
   return new Promise((resolve, reject) => {
     const request = indexedDB.open(DB_NAME, DB_VERSION);
@@ -21,6 +33,9 @@ function openDB() {
   });
 }
 
+/**
+ * Commits upcoming reminders to the local database for background execution.
+ */
 function saveNotifications(data) {
   return openDB().then(db => {
     const tx = db.transaction(STORE_NAME, 'readwrite');
@@ -50,12 +65,15 @@ function deleteNotification(id) {
   });
 }
 
-// ------ Schedule individual timers ------
+/* --- NOTIFICATION SCHEDULING LOGIC --- */
+
+/**
+ * Calculates time offsets for scheduled events and initializes timers.
+ */
 function scheduleItem(item) {
   const scheduledTime = new Date(item.scheduledAt).getTime();
   const delay = scheduledTime - Date.now();
   if (delay <= 0) {
-    // Already due → fire immediately
     fireAndDelete(item);
   } else {
     const timer = setTimeout(() => fireAndDelete(item), delay);
@@ -68,6 +86,9 @@ function clearTimers() {
   timers = [];
 }
 
+/**
+ * Triggers the OS-level notification and cleans up the database queue.
+ */
 async function fireAndDelete(item) {
   await self.registration.showNotification(item.title, {
     body: item.body,
@@ -78,21 +99,25 @@ async function fireAndDelete(item) {
   await deleteNotification(item.id);
 }
 
-// On new schedule from App.js or on activation, reschedule
 async function rescheduleAll() {
   clearTimers();
   const items = await loadNotifications();
   items.forEach(scheduleItem);
 }
 
-// ------ Message from App.js ------
+/* --- SERVICE WORKER LIFECYCLE EVENTS --- */
+
+// Listener for main thread messages (e.g., triggering a sync)
 self.addEventListener('message', (event) => {
   if (event.data && event.data.type === 'SCHEDULE_NOTIFICATIONS') {
     saveNotifications(event.data.notifications).then(rescheduleAll);
   }
 });
 
-// ------ Activate event ------
+/**
+ * Activation Phase: Performs cache purging of legacy versions
+ * to ensure the user is always on the latest design build.
+ */
 self.addEventListener('activate', (event) => {
   event.waitUntil(
     Promise.all([
@@ -110,7 +135,9 @@ self.addEventListener('activate', (event) => {
   );
 });
 
-// ------ Install & cache (unchanged) ------
+/**
+ * Installation Phase: Pre-caches critical UI assets for instant loading.
+ */
 self.addEventListener('install', (event) => {
   event.waitUntil(
     caches.open(CACHE_NAME).then((cache) => {
@@ -126,7 +153,23 @@ self.addEventListener('install', (event) => {
   );
 });
 
+/* --- NETWORK INTERCEPTION (FETCH HANDLER) --- */
+
+/**
+ * Implements a "Stale-While-Revalidate" caching strategy.
+ * This prioritizes speed while ensuring dynamic API calls (Groq/OpenAI)
+ * bypass the cache to maintain real-time data integrity.
+ */
 self.addEventListener('fetch', (event) => {
+  const isApiRequest = event.request.url.includes('groq.com') || 
+                       event.request.url.includes('/functions/') || 
+                       event.request.method !== 'GET';
+
+  // API calls must always be live to avoid 'stale' chat responses
+  if (isApiRequest) {
+    return; 
+  }
+
   event.respondWith(
     caches.match(event.request).then((cachedResponse) => {
       return cachedResponse || fetch(event.request).then((response) => {

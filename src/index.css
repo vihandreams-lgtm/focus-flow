@@ -1,12 +1,29 @@
-body {
+/**
+ * FocusFlow Global Stylesheet
+ * * Core reset and typographic foundation for the FocusFlow Design System.
+ * Optimized for high-density displays and modern browsing environments.
+ */
+
+ body {
   margin: 0;
+  /* System font stack for native performance and readability across OS environments */
   font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', 'Roboto', 'Oxygen',
     'Ubuntu', 'Cantarell', 'Fira Sans', 'Droid Sans', 'Helvetica Neue',
     sans-serif;
+  
+  /* Smoothing optimizations for WebKit and Firefox rendering engines */
   -webkit-font-smoothing: antialiased;
-  -moz-osx-font-smoothing: grayscale;
+  -moz-osx-smoothing: grayscale;
+  
+  /* Ensure the body acts as a stable container for absolute UI overlays */
+  position: relative;
+  overflow-x: hidden;
 }
 
+/**
+ * Technical Typography
+ * Consistent monospaced stack for data-heavy views and code snippets.
+ */
 code {
   font-family: source-code-pro, Menlo, Monaco, Consolas, 'Courier New',
     monospace;

@@ -1,5 +1,5 @@
-import React, { useState, useEffect, useMemo, useCallback, useRef } from 'react';
 import OpenAI from "openai";
+import React, { useState, useEffect, useMemo, useCallback, useRef } from 'react';
 import { db } from './firebase';
 import {
   getAuth,
@@ -10,7 +10,6 @@ import {
   deleteUser
 } from 'firebase/auth';
 import { ref, set, onValue, update, push, remove } from "firebase/database";
-import * as XLSX from 'xlsx';
 
 function App() {
   // --- AUTHENTICATION STATE ---
@@ -79,13 +78,111 @@ function App() {
   const [customMinutes, setCustomMinutes] = useState(25);
   const [showHistory, setShowHistory] = useState(false);
 
+  // ========== AI ASSISTANT AGENT STATE ==========
+  const [assistantMessages, setAssistantMessages] = useState([
+    { role: 'assistant', content: "Hey there! I'm your FocusFlow AI Assistant. Ask me about your timetable, add tasks, manage your schedule, or just get some study motivation! 💫" }
+  ]);
+  const [assistantInput, setAssistantInput] = useState('');
+  const [assistantLoading, setAssistantLoading] = useState(false);
+  // BATCH ACTIONS: array of pending action objects, each with a unique batchId
+  const [pendingActions, setPendingActions] = useState([]);
+  const [isListening, setIsListening] = useState(false);
+  // RECORDER-STYLE: continuous + interimResults, manual stop
+  const recognitionRef = useRef(null);
+  const recognitionRunningRef = useRef(false);
+  const interimTranscriptRef = useRef('');
+  const assistantEndRef = useRef(null);
+  const chatContainerRef = useRef(null);
+  const typingIntervalRef = useRef(null);
+
+  // Auto-scroll chat to bottom — streams with typing animation
+  useEffect(() => {
+    if (chatContainerRef.current) {
+      chatContainerRef.current.scrollTop = chatContainerRef.current.scrollHeight;
+    }
+  }, [assistantMessages, assistantLoading, pendingActions]);
+
+  // RECORDER-STYLE SpeechRecognition: continuous + interimResults, manual stop
+  useEffect(() => {
+    const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
+    if (!SpeechRecognition) {
+      console.warn('Speech recognition not supported');
+      return;
+    }
+    const recognition = new SpeechRecognition();
+    recognition.continuous = true;       // keeps recording until manually stopped
+    recognition.interimResults = true;   // shows partial results in real time
+    recognition.lang = 'en-US';
+
+    recognition.onresult = (event) => {
+      let finalTranscript = '';
+      let interimTranscript = '';
+      for (let i = event.resultIndex; i < event.results.length; i++) {
+        const t = event.results[i][0].transcript;
+        if (event.results[i].isFinal) finalTranscript += t;
+        else interimTranscript += t;
+      }
+      // Show interim text live in the input box
+      if (interimTranscript) {
+        interimTranscriptRef.current = interimTranscript;
+        setAssistantInput(interimTranscript);
+      }
+      // Commit final segment
+      if (finalTranscript) {
+        interimTranscriptRef.current = '';
+        setAssistantInput(prev => {
+          const base = prev.replace(interimTranscriptRef.current, '').trim();
+          return base ? base + ' ' + finalTranscript.trim() : finalTranscript.trim();
+        });
+      }
+    };
+
+    recognition.onerror = (event) => {
+      console.error('Speech recognition error', event.error);
+      if (event.error === 'not-allowed') {
+        alert('Microphone access was denied. Please allow microphone permissions.');
+      }
+    };
+
+    // onend is the single sync point — fires on stop() or natural end
+    recognition.onend = () => {
+      recognitionRunningRef.current = false;
+      setIsListening(false);
+    };
+
+    recognitionRef.current = recognition;
+  }, []);
+
+  // RECORDER-STYLE toggle: tap once to start, tap again to stop manually
+  const toggleListening = useCallback(() => {
+    if (!recognitionRef.current) {
+      alert('Speech recognition is not supported in your browser. Try Chrome, Edge, or Safari.');
+      return;
+    }
+    if (recognitionRunningRef.current) {
+      // Second tap: manually stop — text stays in input box, user sends it themselves
+      try { recognitionRef.current.stop(); } catch (e) { console.warn('Stop error:', e); }
+      // onend will sync recognitionRunningRef and isListening
+    } else {
+      // First tap: start recording
+      try {
+        setAssistantInput('');
+        interimTranscriptRef.current = '';
+        recognitionRef.current.start();
+        recognitionRunningRef.current = true;
+        setIsListening(true);
+      } catch (error) {
+        console.error('Start error:', error);
+        recognitionRunningRef.current = false;
+        setIsListening(false);
+      }
+    }
+  }, []);
+
   // ========== LIVE NOW STATE ==========
   const [now, setNow] = useState(new Date());
-
   useEffect(() => {
-    const interval = setInterval(() => {
-      setNow(new Date());
-    }, 1000);
+    const interval = setInterval(() => setNow(new Date()), 1000);
     return () => clearInterval(interval);
   }, []);
 
@@ -93,9 +190,7 @@ function App() {
   const swRegRef = useRef(null);
   useEffect(() => {
     if ('serviceWorker' in navigator) {
-      navigator.serviceWorker.ready.then(reg => {
-        swRegRef.current = reg;
-      });
+      navigator.serviceWorker.ready.then(reg => { swRegRef.current = reg; });
     }
   }, []);
 
@@ -112,13 +207,10 @@ function App() {
 
   // ========== NOTIFICATION PERMISSION ==========
   const requestNotificationPermission = useCallback(async () => {
-    if (typeof Notification !== 'undefined' && Notification.permission === 'default') {
+    if (typeof Notification !== 'undefined' && Notification.permission === 'default')
       await Notification.requestPermission();
-    }
   }, []);
-  useEffect(() => {
-    if (user) requestNotificationPermission();
-  }, [user, requestNotificationPermission]);
+  useEffect(() => { if (user) requestNotificationPermission(); }, [user, requestNotificationPermission]);
 
   // ---------- localStorage helpers ----------
   const getStorageKey = (uid, key) => `focusflow_${uid}_${key}`;
@@ -126,10 +218,7 @@ function App() {
     try { localStorage.setItem(getStorageKey(uid, key), JSON.stringify(data)); } catch (e) { console.warn('localStorage save failed', e); }
   }, []);
   const loadFromLocal = useCallback((uid, key) => {
-    try {
-      const raw = localStorage.getItem(getStorageKey(uid, key));
-      return raw ? JSON.parse(raw) : null;
-    } catch { return null; }
+    try { const raw = localStorage.getItem(getStorageKey(uid, key)); return raw ? JSON.parse(raw) : null; } catch { return null; }
   }, []);
 
   // ---------- SMART MERGE FUNCTIONS ----------
@@ -142,14 +231,9 @@ function App() {
     allIds.forEach(id => {
       const localItem = localMap.get(id);
       const remoteItem = remoteMap.get(id);
-      if (localItem && remoteItem) {
-        const localTime = localItem.lastUpdated || 0;
-        const remoteTime = remoteItem.lastUpdated || 0;
-        merged.push(localTime > remoteTime ? localItem : remoteItem);
-      } else if (localItem && !remoteItem) {
-        merged.push(localItem);
-      } else if (!localItem && remoteItem) {
-        merged.push(remoteItem);
+      if (remoteItem) {
+        if (localItem && localItem.lastUpdated > remoteItem.lastUpdated) merged.push(localItem);
+        else merged.push(remoteItem);
       }
     });
     if (JSON.stringify(merged) !== JSON.stringify(remoteData)) {
@@ -178,79 +262,22 @@ function App() {
     const userRef = (path) => ref(db, `users/${uid}/${path}`);
 
     const preload = (key, setter) => { const d = loadFromLocal(uid, key); if (d) setter(d); };
-    preload('tasks', setTasks);
-    preload('lectures', setLectures);
-    preload('revisions', setRevisions);
-    preload('exams', setExams);
-    preload('coursework', setCoursework);
-    const ts = loadFromLocal(uid, 'timerState');
-    if (ts) setFocusGoal(ts.currentFocus || '');
-    const st = loadFromLocal(uid, 'stats');
-    if (st) {
-      setSessionsCompleted(st.total || 0);
-      setSessionsToday(st.today || 0);
-      setLastActiveDate(st.lastDate || '');
-    }
-    const fh = loadFromLocal(uid, 'focusHistory');
-    if (fh) {
-      setFocusHistory(fh);
-      const sorted = fh.sort((a, b) => new Date(b.timestamp) - new Date(a.timestamp));
-      setRecentFocusHistory(sorted.slice(0, 3));
-    }
+    preload('tasks', setTasks); preload('lectures', setLectures); preload('revisions', setRevisions);
+    preload('exams', setExams); preload('coursework', setCoursework);
+    const ts = loadFromLocal(uid, 'timerState'); if (ts) setFocusGoal(ts.currentFocus || '');
+    const st = loadFromLocal(uid, 'stats'); if (st) { setSessionsCompleted(st.total || 0); setSessionsToday(st.today || 0); setLastActiveDate(st.lastDate || ''); }
+    const fh = loadFromLocal(uid, 'focusHistory'); if (fh) { setFocusHistory(fh); const sorted = fh.sort((a,b)=>new Date(b.timestamp)-new Date(a.timestamp)); setRecentFocusHistory(sorted.slice(0,3)); }
 
-    const unsubTasks = onValue(userRef('tasks'), (snap) => {
-      const remote = snap.val() || [];
-      setTasks(prev => { const merged = mergeArrayWithTimestamps(remote, uid, 'tasks'); saveToLocal(uid, 'tasks', merged); return merged; });
-    });
-    const unsubLectures = onValue(userRef('lectures'), (snap) => {
-      const remote = snap.val() || [];
-      setLectures(prev => { const merged = mergeArrayWithTimestamps(remote, uid, 'lectures'); saveToLocal(uid, 'lectures', merged); return merged; });
-    });
-    const unsubRevisions = onValue(userRef('revisions'), (snap) => {
-      const remote = snap.val() || [];
-      setRevisions(prev => { const merged = mergeArrayWithTimestamps(remote, uid, 'revisions'); saveToLocal(uid, 'revisions', merged); return merged; });
-    });
-    const unsubExams = onValue(userRef('exams'), (snap) => {
-      const remote = snap.val() || [];
-      setExams(prev => { const merged = mergeArrayWithTimestamps(remote, uid, 'exams'); saveToLocal(uid, 'exams', merged); return merged; });
-    });
-    const unsubCoursework = onValue(userRef('coursework'), (snap) => {
-      const remote = snap.val() || [];
-      setCoursework(prev => { const merged = mergeArrayWithTimestamps(remote, uid, 'coursework'); saveToLocal(uid, 'coursework', merged); return merged; });
-    });
-    const unsubTimerState = onValue(userRef('timerState'), (snap) => {
-      const remote = snap.val() || {};
-      const merged = mergeObjectWithTimestamp(remote, uid, 'timerState');
-      setFocusGoal(merged.currentFocus || '');
-      saveToLocal(uid, 'timerState', merged);
-    });
-    const unsubStats = onValue(userRef('stats'), (snap) => {
-      const remote = snap.val() || {};
-      const merged = mergeObjectWithTimestamp(remote, uid, 'stats');
-      if (merged) {
-        setSessionsCompleted(merged.total || 0);
-        setSessionsToday(merged.today || 0);
-        setLastActiveDate(merged.lastDate || '');
-        saveToLocal(uid, 'stats', merged);
-      }
-    });
-    const unsubFocusHistory = onValue(userRef('focusHistory'), (snap) => {
-      const remote = snap.val() || {};
-      const remoteEntries = Object.values(remote);
-      const localHistory = loadFromLocal(uid, 'focusHistory') || [];
-      const remoteTimestamps = new Set(remoteEntries.map(e => e.timestamp));
-      const newLocal = localHistory.filter(e => !remoteTimestamps.has(e.timestamp));
-      const combined = [...remoteEntries, ...newLocal].sort((a, b) => new Date(b.timestamp) - new Date(a.timestamp));
-      setFocusHistory(combined);
-      saveToLocal(uid, 'focusHistory', combined);
-      setRecentFocusHistory(combined.slice(0, 3));
-      newLocal.forEach(entry => push(userRef('focusHistory'), entry));
-    });
+    const unsubTasks = onValue(userRef('tasks'), (snap) => { const remote = snap.val() || []; setTasks(prev => { const merged = mergeArrayWithTimestamps(remote, uid, 'tasks'); saveToLocal(uid, 'tasks', merged); return merged; }); });
+    const unsubLectures = onValue(userRef('lectures'), (snap) => { const remote = snap.val() || []; setLectures(prev => { const merged = mergeArrayWithTimestamps(remote, uid, 'lectures'); saveToLocal(uid, 'lectures', merged); return merged; }); });
+    const unsubRevisions = onValue(userRef('revisions'), (snap) => { const remote = snap.val() || []; setRevisions(prev => { const merged = mergeArrayWithTimestamps(remote, uid, 'revisions'); saveToLocal(uid, 'revisions', merged); return merged; }); });
+    const unsubExams = onValue(userRef('exams'), (snap) => { const remote = snap.val() || []; setExams(prev => { const merged = mergeArrayWithTimestamps(remote, uid, 'exams'); saveToLocal(uid, 'exams', merged); return merged; }); });
+    const unsubCoursework = onValue(userRef('coursework'), (snap) => { const remote = snap.val() || []; setCoursework(prev => { const merged = mergeArrayWithTimestamps(remote, uid, 'coursework'); saveToLocal(uid, 'coursework', merged); return merged; }); });
+    const unsubTimerState = onValue(userRef('timerState'), (snap) => { const remote = snap.val() || {}; const merged = mergeObjectWithTimestamp(remote, uid, 'timerState'); setFocusGoal(merged.currentFocus || ''); saveToLocal(uid, 'timerState', merged); });
+    const unsubStats = onValue(userRef('stats'), (snap) => { const remote = snap.val() || {}; const merged = mergeObjectWithTimestamp(remote, uid, 'stats'); if (merged) { setSessionsCompleted(merged.total || 0); setSessionsToday(merged.today || 0); setLastActiveDate(merged.lastDate || ''); saveToLocal(uid, 'stats', merged); } });
+    const unsubFocusHistory = onValue(userRef('focusHistory'), (snap) => { const remote = snap.val() || {}; const remoteEntries = Object.values(remote); const localHistory = loadFromLocal(uid, 'focusHistory') || []; const remoteTimestamps = new Set(remoteEntries.map(e => e.timestamp)); const newLocal = localHistory.filter(e => !remoteTimestamps.has(e.timestamp)); const combined = [...remoteEntries, ...newLocal].sort((a,b)=>new Date(b.timestamp)-new Date(a.timestamp)); setFocusHistory(combined); saveToLocal(uid, 'focusHistory', combined); setRecentFocusHistory(combined.slice(0,3)); newLocal.forEach(entry => push(userRef('focusHistory'), entry)); });
 
-    return () => {
-      unsubTasks(); unsubLectures(); unsubRevisions(); unsubExams(); unsubCoursework();
-      unsubTimerState(); unsubStats(); unsubFocusHistory();
-    };
+    return () => { unsubTasks(); unsubLectures(); unsubRevisions(); unsubExams(); unsubCoursework(); unsubTimerState(); unsubStats(); unsubFocusHistory(); };
   }, [user, mergeArrayWithTimestamps, mergeObjectWithTimestamp, saveToLocal, loadFromLocal]);
 
   // Build subject options
@@ -269,13 +296,10 @@ function App() {
       ...revisions.filter(r => r.day === todayName).map(i => ({...i, category: 'REVISION'})),
       ...exams.filter(e => e.date === todayISO).map(i => ({...i, category: 'EXAM'}))
     ];
-    const todayTests = coursework
-      .filter(cw => cw.type === 'Test' && cw.deadline === todayISO)
-      .map(cw => ({
-        id: cw.id, subject: cw.text,
-        startTime: cw.dueTime || '23:59', endTime: cw.dueTime || '23:59',
-        venue: 'Test Deadline', category: 'TEST', dueTime: cw.dueTime
-      }));
+    const todayTests = coursework.filter(cw => cw.type === 'Test' && cw.deadline === todayISO).map(cw => ({
+      id: cw.id, subject: cw.text, startTime: cw.dueTime || '23:59', endTime: cw.dueTime || '23:59',
+      venue: 'Test Deadline', category: 'TEST', dueTime: cw.dueTime
+    }));
     return [...combined, ...todayTests].sort((a, b) => a.startTime.localeCompare(b.startTime));
   }, [lectures, revisions, exams, coursework, todayName, todayISO]);
 
@@ -296,19 +320,16 @@ function App() {
       if (cw.completed || !cw.deadline) return;
       const deadlineDate = new Date(cw.deadline + 'T09:00:00');
       if (isNaN(deadlineDate.getTime())) return;
-      const twoDaysBefore = new Date(deadlineDate);
-      twoDaysBefore.setDate(deadlineDate.getDate() - 2);
-      const oneDayBefore = new Date(deadlineDate);
-      oneDayBefore.setDate(deadlineDate.getDate() - 1);
+      const twoDaysBefore = new Date(deadlineDate); twoDaysBefore.setDate(deadlineDate.getDate() - 2);
+      const oneDayBefore = new Date(deadlineDate); oneDayBefore.setDate(deadlineDate.getDate() - 1);
       notifications.push({ id: `cw-2day-${cw.id}`, title: `📚 Coursework Reminder`, body: `${cw.text} due in 2 days (${cw.deadline})`, scheduledAt: twoDaysBefore.toISOString() });
       notifications.push({ id: `cw-1day-${cw.id}`, title: `📚 Coursework Reminder`, body: `${cw.text} due tomorrow! (${cw.deadline})`, scheduledAt: oneDayBefore.toISOString() });
     });
     swRegRef.current.active.postMessage({ type: 'SCHEDULE_NOTIFICATIONS', notifications });
   }, [todaysActivities, coursework, user]);
-
   useEffect(() => { sendScheduleToSW(); }, [sendScheduleToSW]);
 
-  // ========== INSTANT NOTIFICATIONS (CRASH‑PROOF) ==========
+  // ========== INSTANT NOTIFICATIONS ==========
   const safeNotify = useCallback((title, body) => {
     try {
       if (typeof Notification !== 'undefined' && Notification.permission === 'granted') {
@@ -318,7 +339,6 @@ function App() {
       }
     } catch (error) { console.warn('Notification error:', error); }
   }, []);
-
   const notifiedRef = useRef(new Set());
   useEffect(() => {
     if (!user) return;
@@ -331,27 +351,18 @@ function App() {
         const nowTime = now.getTime();
         if (nowTime >= preDate.getTime() && nowTime < startDate.getTime()) {
           const key = `pre-${act.id}`;
-          if (!notifiedRef.current.has(key)) {
-            safeNotify(`⏰ ${act.subject} ${act.category}`, 'Starting in 10 minutes');
-            notifiedRef.current.add(key);
-          }
+          if (!notifiedRef.current.has(key)) { safeNotify(`⏰ ${act.subject} ${act.category}`, 'Starting in 10 minutes'); notifiedRef.current.add(key); }
         }
         if (nowTime >= startDate.getTime() && nowTime < startDate.getTime() + 60000) {
           const key = `start-${act.id}`;
-          if (!notifiedRef.current.has(key)) {
-            safeNotify(`🔔 ${act.subject} ${act.category}`, 'Starting now');
-            notifiedRef.current.add(key);
-          }
+          if (!notifiedRef.current.has(key)) { safeNotify(`🔔 ${act.subject} ${act.category}`, 'Starting now'); notifiedRef.current.add(key); }
         }
       });
     } catch (error) { console.warn('Instant notification check error:', error); }
   }, [now, todaysActivities, user, safeNotify]);
-
   useEffect(() => {
-    const midnight = new Date();
-    midnight.setHours(24, 0, 0, 0);
-    const timeToMidnight = midnight.getTime() - Date.now();
-    const timer = setTimeout(() => notifiedRef.current.clear(), timeToMidnight);
+    const midnight = new Date(); midnight.setHours(24,0,0,0);
+    const timer = setTimeout(() => notifiedRef.current.clear(), midnight.getTime() - Date.now());
     return () => clearTimeout(timer);
   }, []);
 
@@ -364,8 +375,7 @@ function App() {
   }, [authMode, passwordLongEnough, passwordHasNumber, authPassword, authConfirmPassword]);
 
   const handleAuthSubmit = async (e) => {
-    e.preventDefault();
-    setAuthError('');
+    e.preventDefault(); setAuthError('');
     if (!authEmail || !authPassword) { setAuthError('Email and password required'); return; }
     if (authMode === 'signup') {
       if (!passwordLongEnough) { setAuthError('Password must be at least 6 characters'); return; }
@@ -377,11 +387,7 @@ function App() {
       else await signInWithEmailAndPassword(auth, authEmail, authPassword);
     } catch (error) { setAuthError(error.message); }
   };
-
-  const handleLogout = async () => {
-    try { await signOut(auth); setShowProfile(false); } catch (error) { console.error('Logout error:', error); }
-  };
-
+  const handleLogout = async () => { try { await signOut(auth); setShowProfile(false); } catch (error) { console.error('Logout error:', error); } };
   const handleDeleteAccount = async () => {
     if (!user) return;
     const confirmed = window.confirm('⚠️ PERMANENTLY DELETE YOUR ACCOUNT?\n\nThis will erase all your data. This action cannot be undone.');
@@ -390,151 +396,78 @@ function App() {
       await remove(ref(db, `users/${user.uid}`));
       const keys = Object.keys(localStorage).filter(k => k.startsWith(`focusflow_${user.uid}_`));
       keys.forEach(k => localStorage.removeItem(k));
-      await deleteUser(user);
-      setShowProfile(false);
+      await deleteUser(user); setShowProfile(false);
     } catch (error) { console.error('Delete account error:', error); alert('Failed to delete account. You may need to re-authenticate. ' + error.message); }
   };
 
-  // --- AI RECOMMENDATION ENGINE (Groq) – unchanged for revision timetable ---
+  // --- AI RECOMMENDATION ENGINE (Groq) – for revision timetable generator ---
   const generateRecommendations = async () => {
-    if (!user) return;
-    const groqKey = process.env.REACT_APP_GROQ_KEY;
-    if (!groqKey) { alert("Groq API key not configured. Please add REACT_APP_GROQ_KEY to your .env file to use this feature."); return; }
-    setIsGenerating(true);
-    setRecommendations([]);
+    if (!user) return; setIsGenerating(true); setRecommendations([]);
     try {
-      const groq = new OpenAI({ apiKey: groqKey, baseURL: "https://api.groq.com/openai/v1", dangerouslyAllowBrowser: true });
-      const currentTime = new Date();
-      const currentTimeStr = currentTime.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', hour12: false });
-      const todayStr = currentTime.toLocaleDateString();
+      const apiKey = process.env.REACT_APP_GROQ_KEY;
+      const groq = new OpenAI({ apiKey, baseURL: "https://api.groq.com/openai/v1", dangerouslyAllowBrowser: true });
+      const currentTime = new Date(); const currentTimeStr = currentTime.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', hour12: false }); const todayStr = currentTime.toLocaleDateString();
       const todaysSchedule = todaysActivities.map(act => ({ subject: act.subject, start: act.startTime, end: act.endTime || act.startTime, category: act.category }));
       const courseworkItems = coursework.map(cw => ({ subject: cw.text, deadline: cw.deadline, type: cw.type }));
       const twoWeeksAgo = new Date(); twoWeeksAgo.setDate(twoWeeksAgo.getDate() - 14);
       const recentHistory = focusHistory.filter(entry => new Date(entry.timestamp) >= twoWeeksAgo);
-      const prompt = `You are an AI study planner. Based on the following data, create a personalised revision timetable for TODAY.
-Current time: ${currentTimeStr} on ${todayStr}. Only suggest slots that start AFTER the current time.
-Today's existing schedule: ${JSON.stringify(todaysSchedule, null, 2)}
-Coursework and deadlines: ${JSON.stringify(courseworkItems, null, 2)}
-Recent focus history (last 14 days): ${JSON.stringify(recentHistory, null, 2)}
-Instructions:
-- Identify free time gaps (day ends at 22:00).
-- Prioritise subjects with upcoming deadlines (within 7 days) or neglected.
-- Generate 1 to 3 revision sessions.
-- Each session must include: subject, startTime (HH:MM), endTime (HH:MM), reasoning.
-- Return ONLY a JSON array of objects with keys: subject, startTime, endTime, reasoning.`;
-      const completion = await groq.chat.completions.create({
-        model: "llama-3.3-70b-versatile",
-        messages: [{ role: "system", content: "You are a helpful study planner. Respond only with valid JSON." }, { role: "user", content: prompt }],
-        temperature: 0.3,
-      });
-      const responseText = completion.choices[0].message.content;
-      const jsonMatch = responseText.match(/\[[\s\S]*\]/);
-      if (!jsonMatch) throw new Error("Invalid AI response format");
-      const parsed = JSON.parse(jsonMatch[0]);
+      const prompt = `You are an AI study planner. Based on the following data, create a personalised revision timetable for TODAY. Current time: ${currentTimeStr} on ${todayStr}. Only suggest slots that start AFTER the current time. Today's existing schedule: ${JSON.stringify(todaysSchedule, null, 2)}. Coursework and deadlines: ${JSON.stringify(courseworkItems, null, 2)}. Recent focus history (last 14 days): ${JSON.stringify(recentHistory, null, 2)}. Instructions: - Identify free time gaps (day ends at 22:00). - Prioritise subjects with upcoming deadlines (within 7 days) or neglected. - Generate 1 to 3 revision sessions. - Each session must include: subject, startTime (HH:MM), endTime (HH:MM), reasoning. - Return ONLY a JSON array of objects with keys: subject, startTime, endTime, reasoning.`;
+      const completion = await groq.chat.completions.create({ model: "llama-3.3-70b-versatile", messages: [{ role: "system", content: "You are a helpful study planner. Respond only with valid JSON." }, { role: "user", content: prompt }], temperature: 0.3 });
+      const responseText = completion.choices[0].message.content; const jsonMatch = responseText.match(/\[[\s\S]*\]/);
+      if (!jsonMatch) throw new Error("Invalid AI response format"); const parsed = JSON.parse(jsonMatch[0]);
       const validated = parsed.filter(rec => rec.subject && rec.startTime && rec.endTime && rec.reasoning).map((rec, idx) => ({ ...rec, id: Date.now() + idx }));
       setRecommendations(validated);
     } catch (error) { console.error("AI generation error:", error); alert("AI service unavailable. Please try again later."); }
     finally { setIsGenerating(false); }
   };
-
   const handleAddRecommendation = (rec) => {
     if (!user) return;
     const newEntry = { id: Date.now(), subject: rec.subject, startTime: rec.startTime, endTime: rec.endTime, venue: 'AI Recommended', day: todayName, lastUpdated: Date.now() };
-    const updatedRevisions = [newEntry, ...revisions];
-    setRevisions(updatedRevisions);
-    saveToLocal(user.uid, 'revisions', updatedRevisions);
-    set(ref(db, `users/${user.uid}/revisions`), updatedRevisions);
-    alert(`Added "${rec.subject}" revision at ${rec.startTime}`);
-    setRecommendations(prev => prev.filter(r => r.id !== rec.id));
+    const updatedRevisions = [newEntry, ...revisions]; setRevisions(updatedRevisions); saveToLocal(user.uid, 'revisions', updatedRevisions); set(ref(db, `users/${user.uid}/revisions`), updatedRevisions);
+    alert(`Added "${rec.subject}" revision at ${rec.startTime}`); setRecommendations(prev => prev.filter(r => r.id !== rec.id));
   };
   const dismissRecommendation = (id) => { setRecommendations(prev => prev.filter(r => r.id !== id)); };
 
-  // --- FOCUS TIMER LOGIC --- (unchanged)
+  // --- FOCUS TIMER LOGIC ---
   useEffect(() => {
     if (!user) return;
     const today = new Date().toLocaleDateString();
-    if (lastActiveDate && lastActiveDate !== today) {
-      const newStats = { total: sessionsCompleted, today: 0, lastDate: today, lastUpdated: Date.now() };
-      update(ref(db, `users/${user.uid}/stats`), newStats);
-      saveToLocal(user.uid, 'stats', newStats);
-    }
+    if (lastActiveDate && lastActiveDate !== today) { const newStats = { total: sessionsCompleted, today: 0, lastDate: today, lastUpdated: Date.now() }; update(ref(db, `users/${user.uid}/stats`), newStats); saveToLocal(user.uid, 'stats', newStats); }
   }, [lastActiveDate, user, sessionsCompleted, saveToLocal]);
-
   const handleFocusChange = (e) => {
     const val = e.target.value;
     if (val === 'custom') { setIsCustomFocus(true); setFocusGoal(''); }
-    else {
-      setIsCustomFocus(false);
-      setFocusGoal(val);
-      if (user) {
-        const newTimerState = { currentFocus: val, lastUpdated: Date.now() };
-        set(ref(db, `users/${user.uid}/timerState`), newTimerState);
-        saveToLocal(user.uid, 'timerState', newTimerState);
-      }
-    }
+    else { setIsCustomFocus(false); setFocusGoal(val); if (user) { const newTimerState = { currentFocus: val, lastUpdated: Date.now() }; set(ref(db, `users/${user.uid}/timerState`), newTimerState); saveToLocal(user.uid, 'timerState', newTimerState); } }
   };
-  const handleCustomFocusChange = (e) => {
-    const val = e.target.value;
-    setCustomFocusInput(val);
-    setFocusGoal(val);
-    if (user) {
-      const newTimerState = { currentFocus: val, lastUpdated: Date.now() };
-      set(ref(db, `users/${user.uid}/timerState`), newTimerState);
-      saveToLocal(user.uid, 'timerState', newTimerState);
-    }
-  };
-  const handleMinutesChange = (e) => {
-    const mins = parseInt(e.target.value, 10);
-    if (!isNaN(mins) && mins > 0) { setCustomMinutes(mins); setTotalTime(mins * 60); setSeconds(mins * 60); }
-  };
-
+  const handleCustomFocusChange = (e) => { const val = e.target.value; setCustomFocusInput(val); setFocusGoal(val); if (user) { const newTimerState = { currentFocus: val, lastUpdated: Date.now() }; set(ref(db, `users/${user.uid}/timerState`), newTimerState); saveToLocal(user.uid, 'timerState', newTimerState); } };
+  const handleMinutesChange = (e) => { const mins = parseInt(e.target.value, 10); if (!isNaN(mins) && mins > 0) { setCustomMinutes(mins); setTotalTime(mins * 60); setSeconds(mins * 60); } };
   useEffect(() => {
     let interval = null;
     if (isActive && seconds > 0) { interval = setInterval(() => setSeconds(s => s - 1), 1000); }
     else if (seconds === 0 && isActive) {
-      setIsActive(false);
-      new Audio('https://actions.google.com/sounds/v1/alarms/beep_short.ogg').play().catch(() => {});
+      setIsActive(false); new Audio('https://actions.google.com/sounds/v1/alarms/beep_short.ogg').play().catch(() => {});
       if (totalTime === customMinutes * 60 && user) {
         const sessionLog = { subjectName: focusGoal || 'Untitled Session', duration: customMinutes, timestamp: new Date().toISOString(), lastUpdated: Date.now() };
         push(ref(db, `users/${user.uid}/focusHistory`), sessionLog);
-        const newDailyCount = sessionsToday + 1;
-        const newTotalCount = sessionsCompleted + 1;
+        const newDailyCount = sessionsToday + 1; const newTotalCount = sessionsCompleted + 1;
         const newStats = { total: newTotalCount, today: newDailyCount, lastDate: new Date().toLocaleDateString(), lastUpdated: Date.now() };
-        set(ref(db, `users/${user.uid}/stats`), newStats);
-        saveToLocal(user.uid, 'stats', newStats);
-        const updatedHistory = [...focusHistory, sessionLog];
-        saveToLocal(user.uid, 'focusHistory', updatedHistory);
-        setRecentFocusHistory(updatedHistory.slice(-3));
+        set(ref(db, `users/${user.uid}/stats`), newStats); saveToLocal(user.uid, 'stats', newStats);
+        const updatedHistory = [...focusHistory, sessionLog]; saveToLocal(user.uid, 'focusHistory', updatedHistory); setRecentFocusHistory(updatedHistory.slice(-3));
         if (newDailyCount % 4 === 0) { alert("4 Sessions Done! Take a long 15-minute break."); setTotalTime(900); setSeconds(900); }
         else { alert("Session Complete! 5-minute break starts now."); setTotalTime(300); setSeconds(300); }
       } else {
-        alert("Break over! Ready to focus?");
-        setTotalTime(customMinutes * 60);
-        setSeconds(customMinutes * 60);
-        setFocusGoal('');
-        setIsCustomFocus(false);
-        setCustomFocusInput('');
-        if (user) {
-          const newTimerState = { currentFocus: '', lastUpdated: Date.now() };
-          set(ref(db, `users/${user.uid}/timerState`), newTimerState);
-          saveToLocal(user.uid, 'timerState', newTimerState);
-        }
+        alert("Break over! Ready to focus?"); setTotalTime(customMinutes * 60); setSeconds(customMinutes * 60); setFocusGoal(''); setIsCustomFocus(false); setCustomFocusInput('');
+        if (user) { const newTimerState = { currentFocus: '', lastUpdated: Date.now() }; set(ref(db, `users/${user.uid}/timerState`), newTimerState); saveToLocal(user.uid, 'timerState', newTimerState); }
       }
     }
     return () => clearInterval(interval);
   }, [isActive, seconds, totalTime, sessionsToday, sessionsCompleted, focusGoal, customMinutes, user, focusHistory, saveToLocal]);
 
   const progressOffset = (2 * Math.PI * 140) - (seconds / totalTime) * (2 * Math.PI * 140);
-
   const getStatus = useCallback((start, end) => {
-    const currentTime = now || new Date();
-    const [sH, sM] = start.split(':').map(Number);
-    const [eH, eM] = end ? end.split(':').map(Number) : [sH + 1, sM];
-    const startDate = new Date(currentTime); startDate.setHours(sH, sM, 0);
-    const endDate = new Date(currentTime); endDate.setHours(eH, eM, 0);
-    if (currentTime > endDate) return 'PAST';
-    if (currentTime >= startDate && currentTime <= endDate) return 'LIVE';
-    return 'UPCOMING';
+    const currentTime = now || new Date(); const [sH, sM] = start.split(':').map(Number); const [eH, eM] = end ? end.split(':').map(Number) : [sH + 1, sM];
+    const startDate = new Date(currentTime); startDate.setHours(sH, sM, 0); const endDate = new Date(currentTime); endDate.setHours(eH, eM, 0);
+    if (currentTime > endDate) return 'PAST'; if (currentTime >= startDate && currentTime <= endDate) return 'LIVE'; return 'UPCOMING';
   }, [now]);
 
   // ---------- CRUD OPERATIONS ----------
@@ -545,299 +478,534 @@ Instructions:
     let path = ttTab === 'LECTURES' ? 'lectures' : ttTab === 'REVISION' ? 'revisions' : 'exams';
     let currentList = ttTab === 'LECTURES' ? lectures : ttTab === 'REVISION' ? revisions : exams;
     const updatedList = editingId ? currentList.map(item => item.id === editingId ? entry : item) : [entry, ...currentList];
-    if (ttTab === 'LECTURES') setLectures(updatedList);
-    else if (ttTab === 'REVISION') setRevisions(updatedList);
-    else setExams(updatedList);
-    saveToLocal(user.uid, path, updatedList);
-    set(ref(db, `users/${user.uid}/${path}`), updatedList);
-    clearForm();
+    if (ttTab === 'LECTURES') setLectures(updatedList); else if (ttTab === 'REVISION') setRevisions(updatedList); else setExams(updatedList);
+    saveToLocal(user.uid, path, updatedList); set(ref(db, `users/${user.uid}/${path}`), updatedList); clearForm();
   };
-  const handleEdit = (item) => {
-    setEditingId(item.id); setSubject(item.subject); setVenue(item.venue);
-    setStartTime(item.startTime); setEndTime(item.endTime); setDay(item.day || 'Monday'); setDate(item.date || '');
-    window.scrollTo({ top: 0, behavior: 'smooth' });
-  };
+  const handleEdit = (item) => { setEditingId(item.id); setSubject(item.subject); setVenue(item.venue); setStartTime(item.startTime); setEndTime(item.endTime); setDay(item.day || 'Monday'); setDate(item.date || ''); window.scrollTo({ top: 0, behavior: 'smooth' }); };
   const confirmDelete = (id, type) => {
     if (!user || !window.confirm("Are you sure you want to delete this?")) return;
     const paths = { LECTURES: 'lectures', REVISION: 'revisions', EXAMS: 'exams', TASK: 'tasks', CW: 'coursework' };
     const lists = { LECTURES: lectures, REVISION: revisions, EXAMS: exams, TASK: tasks, CW: coursework };
-    const path = paths[type];
-    const currentList = lists[type];
-    const updatedList = currentList.filter(x => x.id !== id);
-    if (type === 'LECTURES') setLectures(updatedList);
-    else if (type === 'REVISION') setRevisions(updatedList);
-    else if (type === 'EXAMS') setExams(updatedList);
-    else if (type === 'TASK') setTasks(updatedList);
-    else if (type === 'CW') setCoursework(updatedList);
-    saveToLocal(user.uid, path, updatedList);
-    set(ref(db, `users/${user.uid}/${path}`), updatedList);
+    const path = paths[type]; const currentList = lists[type]; const updatedList = currentList.filter(x => x.id !== id);
+    if (type === 'LECTURES') setLectures(updatedList); else if (type === 'REVISION') setRevisions(updatedList); else if (type === 'EXAMS') setExams(updatedList);
+    else if (type === 'TASK') setTasks(updatedList); else if (type === 'CW') setCoursework(updatedList);
+    saveToLocal(user.uid, path, updatedList); set(ref(db, `users/${user.uid}/${path}`), updatedList);
   };
-  const saveAcademic = () => {
-    if(!user || !cwInput) return;
-    const newCw = { id: Date.now(), text: cwInput, type: cwType, deadline: cwDeadline, dueTime: cwDueTime, completed: false, lastUpdated: Date.now() };
-    const updatedCoursework = [newCw, ...coursework];
-    setCoursework(updatedCoursework);
-    saveToLocal(user.uid, 'coursework', updatedCoursework);
-    set(ref(db, `users/${user.uid}/coursework`), updatedCoursework);
-    setCwInput(''); setCwDeadline(''); setCwDueTime('');
-  };
-  const toggleCw = (id) => {
-    if (!user) return;
-    const updated = coursework.map(x => x.id === id ? { ...x, completed: !x.completed, lastUpdated: Date.now() } : x);
-    setCoursework(updated);
-    saveToLocal(user.uid, 'coursework', updated);
-    set(ref(db, `users/${user.uid}/coursework`), updated);
-  };
-  const addTask = () => {
-    if (!user || !taskInput) return;
-    const newTask = { id: Date.now(), text: taskInput, completed: false, lastUpdated: Date.now() };
+  const saveAcademic = () => { if(!user || !cwInput) return; const newCw = { id: Date.now(), text: cwInput, type: cwType, deadline: cwDeadline, dueTime: cwDueTime, completed: false, lastUpdated: Date.now() }; const updatedCoursework = [newCw, ...coursework]; setCoursework(updatedCoursework); saveToLocal(user.uid, 'coursework', updatedCoursework); set(ref(db, `users/${user.uid}/coursework`), updatedCoursework); setCwInput(''); setCwDeadline(''); setCwDueTime(''); };
+  const toggleCw = (id) => { if (!user) return; const updated = coursework.map(x => x.id === id ? { ...x, completed: !x.completed, lastUpdated: Date.now() } : x); setCoursework(updated); saveToLocal(user.uid, 'coursework', updated); set(ref(db, `users/${user.uid}/coursework`), updated); };
+  const addTask = () => { if (!user || !taskInput) return; const newTask = { id: Date.now(), text: taskInput, completed: false, lastUpdated: Date.now() }; const updatedTasks = [newTask, ...tasks]; setTasks(updatedTasks); saveToLocal(user.uid, 'tasks', updatedTasks); set(ref(db, `users/${user.uid}/tasks`), updatedTasks); setTaskInput(''); };
+  const toggleTask = (id) => { if (!user) return; const updated = tasks.map(x => x.id === id ? { ...x, completed: !x.completed, lastUpdated: Date.now() } : x); setTasks(updated); saveToLocal(user.uid, 'tasks', updated); set(ref(db, `users/${user.uid}/tasks`), updated); };
+  const clearCompletedTasks = () => { if (!user) return; const updated = tasks.filter(t => !t.completed); setTasks(updated); saveToLocal(user.uid, 'tasks', updated); set(ref(db, `users/${user.uid}/tasks`), updated); };
+
+  // --- Agent helper functions (called after Safe-Way confirmation) ---
+  const addTaskFromAgent = (text) => {
+    if (!user || !text) return;
+    const newTask = { id: Date.now(), text, completed: false, lastUpdated: Date.now() };
     const updatedTasks = [newTask, ...tasks];
     setTasks(updatedTasks);
     saveToLocal(user.uid, 'tasks', updatedTasks);
     set(ref(db, `users/${user.uid}/tasks`), updatedTasks);
-    setTaskInput('');
   };
-  const toggleTask = (id) => {
+  const addRevisionFromAgent = (data) => {
     if (!user) return;
-    const updated = tasks.map(x => x.id === id ? { ...x, completed: !x.completed, lastUpdated: Date.now() } : x);
+    const newEntry = { id: Date.now(), subject: data.subject, startTime: data.startTime, endTime: data.endTime, venue: data.venue || 'AI Suggested', day: data.day || todayName, lastUpdated: Date.now() };
+    const updated = [newEntry, ...revisions];
+    setRevisions(updated);
+    saveToLocal(user.uid, 'revisions', updated);
+    set(ref(db, `users/${user.uid}/revisions`), updated);
+  };
+  const addLectureFromAgent = (data) => {
+    if (!user) return;
+    const newEntry = { id: Date.now(), subject: data.subject, startTime: data.startTime, endTime: data.endTime, venue: data.venue || 'AI Suggested', day: data.day, lastUpdated: Date.now() };
+    const updated = [newEntry, ...lectures];
+    setLectures(updated);
+    saveToLocal(user.uid, 'lectures', updated);
+    set(ref(db, `users/${user.uid}/lectures`), updated);
+  };
+  // CORE LOGIC #5: add_exam — final assessments only
+  const addExamFromAgent = (data) => {
+    if (!user) return;
+    const newEntry = { id: Date.now(), subject: data.subject, startTime: data.startTime, endTime: data.endTime, venue: data.venue || '', date: data.date, lastUpdated: Date.now() };
+    const updated = [newEntry, ...exams];
+    setExams(updated);
+    saveToLocal(user.uid, 'exams', updated);
+    set(ref(db, `users/${user.uid}/exams`), updated);
+  };
+  // CORE LOGIC #5: add_test — coursework with type "Test", NOT add_exam
+  const addTestFromAgent = (data) => {
+    if (!user) return;
+    const newTest = { id: Date.now(), text: data.text, type: "Test", deadline: data.deadline, dueTime: data.dueTime || '', completed: false, lastUpdated: Date.now() };
+    const updated = [newTest, ...coursework];
+    setCoursework(updated);
+    saveToLocal(user.uid, 'coursework', updated);
+    set(ref(db, `users/${user.uid}/coursework`), updated);
+  };
+  const addCourseworkFromAgent = (data) => {
+    if (!user) return;
+    const newCw = { id: Date.now(), text: data.text, type: data.type, deadline: data.deadline, dueTime: data.dueTime || '', completed: false, lastUpdated: Date.now() };
+    const updated = [newCw, ...coursework];
+    setCoursework(updated);
+    saveToLocal(user.uid, 'coursework', updated);
+    set(ref(db, `users/${user.uid}/coursework`), updated);
+  };
+  const setupFocusTimerFromAgent = (subject, minutes) => {
+    if (!user) return;
+    setFocusGoal(subject);
+    setCustomMinutes(minutes);
+    setTotalTime(minutes * 60);
+    setSeconds(minutes * 60);
+    const newTimerState = { currentFocus: subject, lastUpdated: Date.now() };
+    set(ref(db, `users/${user.uid}/timerState`), newTimerState);
+    saveToLocal(user.uid, 'timerState', newTimerState);
+    setCurrentScreen('FOCUS');
+  };
+
+  // FIX #3: Delete helpers for AI-driven delete actions
+  const deleteTaskFromAgent = (id) => {
+    if (!user) return;
+    const updated = tasks.filter(t => t.id !== id);
     setTasks(updated);
     saveToLocal(user.uid, 'tasks', updated);
     set(ref(db, `users/${user.uid}/tasks`), updated);
   };
-  const clearCompletedTasks = () => {
+  const deleteCourseworkFromAgent = (id) => {
     if (!user) return;
-    const updated = tasks.filter(t => !t.completed);
+    const updated = coursework.filter(c => c.id !== id);
+    setCoursework(updated);
+    saveToLocal(user.uid, 'coursework', updated);
+    set(ref(db, `users/${user.uid}/coursework`), updated);
+  };
+  const deleteExamFromAgent = (id) => {
+    if (!user) return;
+    const updated = exams.filter(e => e.id !== id);
+    setExams(updated);
+    saveToLocal(user.uid, 'exams', updated);
+    set(ref(db, `users/${user.uid}/exams`), updated);
+  };
+  // FIX #3: Edit helpers
+  const editTaskFromAgent = (id, newText) => {
+    if (!user) return;
+    const updated = tasks.map(t => t.id === id ? { ...t, text: newText, lastUpdated: Date.now() } : t);
     setTasks(updated);
     saveToLocal(user.uid, 'tasks', updated);
     set(ref(db, `users/${user.uid}/tasks`), updated);
   };
-
-  // ========== SMART IMPORT STATE & LOGIC ==========
-  const [importCourse, setImportCourse] = useState('');
-  const [importYear, setImportYear] = useState('');
-  const [importFileText, setImportFileText] = useState('');
-  const [importFileName, setImportFileName] = useState('');
-  const [importResult, setImportResult] = useState([]);
-  const [isImporting, setIsImporting] = useState(false);
-  const [importError, setImportError] = useState('');
-  const [importTargetTab, setImportTargetTab] = useState('LECTURES');
-  const [uploadProgress, setUploadProgress] = useState(0); // new: file reading progress
-
-  // Chat state
-  const [chatMessages, setChatMessages] = useState([]);
-  const [chatInput, setChatInput] = useState('');
-  const [isChatLoading, setIsChatLoading] = useState(false);
-  const chatEndRef = useRef(null);
-  const fileInputRef = useRef(null);
-  const abortControllerRef = useRef(null); // new: for aborting fetch
-
-  useEffect(() => { chatEndRef.current?.scrollIntoView({ behavior: 'smooth' }); }, [chatMessages]);
-
-  const handleFileChange = (e) => {
-    const file = e.target.files[0];
-    if (!file) return;
-    setImportFileName(file.name);
-    setUploadProgress(0);
-    const reader = new FileReader();
-    reader.onprogress = (event) => {
-      if (event.lengthComputable) {
-        const percent = Math.round((event.loaded / event.total) * 100);
-        setUploadProgress(percent);
-      }
-    };
-    reader.onload = (event) => {
-      try {
-        const data = new Uint8Array(event.target.result);
-        const workbook = XLSX.read(data, { type: 'array' });
-        const firstSheet = workbook.SheetNames[0];
-        const csvText = XLSX.utils.sheet_to_csv(workbook.Sheets[firstSheet]);
-        setImportFileText(csvText);
-        setImportError('');
-        setUploadProgress(100); // complete
-        // Clear any existing chat when a new file is loaded
-        setChatMessages([]);
-        setImportResult([]);
-      } catch (err) {
-        console.error('File parse error:', err);
-        setImportError('Could not read the file. Please upload a valid Excel or CSV file.');
-        setImportFileText('');
-        setUploadProgress(0);
-      }
-    };
-    reader.onerror = () => {
-      setImportError('Error reading file.');
-      setUploadProgress(0);
-    };
-    reader.readAsArrayBuffer(file);
-  };
-
-  const runImport = async () => {
-    if (!importCourse || !importYear || !importFileText) {
-      setImportError('Please fill all fields and upload a file.');
-      return;
-    }
-    // Abort any previous request
-    if (abortControllerRef.current) {
-      abortControllerRef.current.abort();
-    }
-    const controller = new AbortController();
-    abortControllerRef.current = controller;
-    setIsImporting(true);
-    setImportError('');
-    setImportResult([]);
-    setChatMessages([]);
-    try {
-      const apiKey = process.env.REACT_APP_GEMINI_KEY;
-      const apiUrl = `/v1/models/gemini-2.5-flash:generateContent?key=${apiKey}`;
-      const prompt = `You are a university timetable assistant. Extract ONLY the classes that match:
-- Course: "${importCourse}"
-- Year: "${importYear}"
-
-For each class, return:
-- subject (string)
-${importTargetTab === 'EXAMS' ? '- date (YYYY-MM-DD)' : '- day (e.g., Monday, Tuesday)'}
-- startTime (HH:MM 24h)
-- endTime (HH:MM 24h)
-- lecturer (string, or "N/A")
-- room (string, or "N/A")
-
-Return ONLY a valid JSON array with those keys. No other text.
-
-Timetable data:
-${importFileText}`;
-
-      const response = await fetch(apiUrl, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ contents: [{ parts: [{ text: prompt }] }], generationConfig: { temperature: 0.1 } }),
-        signal: controller.signal
-      });
-      if (!response.ok) throw new Error(`API error: ${response.status}`);
-      const data = await response.json();
-      const raw = data.candidates?.[0]?.content?.parts?.[0]?.text?.trim();
-      if (!raw) throw new Error('Empty response from AI');
-      const match = raw.match(/\[[\s\S]*\]/);
-      if (!match) throw new Error('No JSON array found');
-      const parsed = JSON.parse(match[0]);
-      if (!Array.isArray(parsed)) throw new Error('Response is not an array');
-      setImportResult(parsed);
-      setChatMessages([
-        { role: 'system', content: `Imported timetable for ${importCourse} Year ${importYear} (${importTargetTab === 'EXAMS' ? 'Exams' : 'Lectures'}).` },
-        { role: 'assistant', content: `I've extracted ${parsed.length} classes. You can chat with me to refine the list.` }
-      ]);
-    } catch (err) {
-      if (err.name === 'AbortError') {
-        console.log('Import aborted by user');
-      } else {
-        console.error('Import error:', err);
-        setImportError('AI could not process the file. Please check the format.');
-      }
-    } finally {
-      setIsImporting(false);
-      abortControllerRef.current = null;
-    }
-  };
-
-  const addImportedLecture = (lecture) => {
+  const editCourseworkFromAgent = (id, fields) => {
     if (!user) return;
-    const newEntry = {
-      id: Date.now(),
-      subject: lecture.subject,
-      startTime: lecture.startTime,
-      endTime: lecture.endTime,
-      venue: lecture.room || 'N/A',
-      lastUpdated: Date.now()
-    };
-    if (importTargetTab === 'EXAMS') {
-      newEntry.date = lecture.date || '';
-      const updatedExams = [newEntry, ...exams];
-      setExams(updatedExams);
-      saveToLocal(user.uid, 'exams', updatedExams);
-      set(ref(db, `users/${user.uid}/exams`), updatedExams);
-    } else {
-      newEntry.day = lecture.day || 'Monday';
-      const updatedLectures = [newEntry, ...lectures];
-      setLectures(updatedLectures);
-      saveToLocal(user.uid, 'lectures', updatedLectures);
-      set(ref(db, `users/${user.uid}/lectures`), updatedLectures);
-    }
-    // Remove the card from the import list
-    setImportResult(prev => prev.filter(l => l !== lecture));
+    const updated = coursework.map(c => c.id === id ? { ...c, ...fields, lastUpdated: Date.now() } : c);
+    setCoursework(updated);
+    saveToLocal(user.uid, 'coursework', updated);
+    set(ref(db, `users/${user.uid}/coursework`), updated);
+  };
+  const editExamFromAgent = (id, fields) => {
+    if (!user) return;
+    const updated = exams.map(e => e.id === id ? { ...e, ...fields, lastUpdated: Date.now() } : e);
+    setExams(updated);
+    saveToLocal(user.uid, 'exams', updated);
+    set(ref(db, `users/${user.uid}/exams`), updated);
+  };
+  // V5.0: edit_revision handler (Scenario C)
+  const editRevisionFromAgent = (id, fields) => {
+    if (!user) return;
+    const updated = revisions.map(r => r.id === id ? { ...r, ...fields, lastUpdated: Date.now() } : r);
+    setRevisions(updated);
+    saveToLocal(user.uid, 'revisions', updated);
+    set(ref(db, `users/${user.uid}/revisions`), updated);
+  };
+  // V5.0: delete_lecture handler (Scenario B)
+  const deleteLectureFromAgent = (id) => {
+    if (!user) return;
+    const updated = lectures.filter(l => l.id !== id);
+    setLectures(updated);
+    saveToLocal(user.uid, 'lectures', updated);
+    set(ref(db, `users/${user.uid}/lectures`), updated);
+  };
+  // V5.0: delete_revision handler (Scenario B)
+  const deleteRevisionFromAgent = (id) => {
+    if (!user) return;
+    const updated = revisions.filter(r => r.id !== id);
+    setRevisions(updated);
+    saveToLocal(user.uid, 'revisions', updated);
+    set(ref(db, `users/${user.uid}/revisions`), updated);
   };
 
-  const removeImportedClass = (index) => {
-    setImportResult(prev => prev.filter((_, i) => i !== index));
-  };
-
-  const clearFile = () => {
-    // Abort any ongoing AI request
-    if (abortControllerRef.current) {
-      abortControllerRef.current.abort();
-      abortControllerRef.current = null;
-    }
-    setIsImporting(false);
-    setImportFileText('');
-    setImportFileName('');
-    setImportError('');
-    setUploadProgress(0);
-    if (fileInputRef.current) fileInputRef.current.value = '';
-    // Optionally clear import results and chat
-    setImportResult([]);
-    setChatMessages([]);
-  };
-
-  const sendChatMessage = async () => {
-    if (!chatInput.trim()) return;
-    const newUserMessage = { role: 'user', content: chatInput.trim() };
-    const updatedMessages = [...chatMessages, newUserMessage];
-    setChatMessages(updatedMessages);
-    setChatInput('');
-    setIsChatLoading(true);
-    try {
-      const apiKey = process.env.REACT_APP_GEMINI_KEY;
-      const apiUrl = `/v1/models/gemini-2.5-flash:generateContent?key=${apiKey}`;
-      let contextText = `Current extracted classes:\n${JSON.stringify(importResult, null, 2)}\n\nUser request: ${newUserMessage.content}`;
-      const isAdding = /add|find|missing|check (again|file)|re-?scan|search for|look for|extract (more|another)|forgot|missed/i.test(newUserMessage.content);
-      if (isAdding && importFileText) {
-        contextText += `\n\nFull Timetable Data (use this to find any missing classes):\n${importFileText}`;
-      }
-      const contextMessage = { role: 'user', parts: [{ text: contextText }] };
-      const historyContents = updatedMessages.slice(0, -1).map(msg => ({
-        role: msg.role === 'assistant' ? 'model' : 'user',
-        parts: [{ text: msg.content }]
-      }));
-      const systemInstruction = {
-        role: 'user',
-        parts: [{ text: `You are a helpful timetable assistant. When asked to add or remove classes, respond with the updated full JSON array of all classes (including those not mentioned). The array must be valid JSON. Each object must have: subject, ${importTargetTab === 'EXAMS' ? 'date (YYYY-MM-DD)' : 'day'}, startTime (HH:MM), endTime (HH:MM), lecturer, room. If the user asks something else, answer conversationally.` }]
-      };
-      const contents = [systemInstruction, ...historyContents, contextMessage];
-      const response = await fetch(apiUrl, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ contents, generationConfig: { temperature: 0.2 } })
+  // ========== AI ASSISTANT — TYPING ANIMATION ==========
+  const simulateTyping = (text) => {
+    if (typingIntervalRef.current) clearInterval(typingIntervalRef.current);
+    let i = 0;
+    typingIntervalRef.current = setInterval(() => {
+      setAssistantMessages(prev => {
+        const updated = [...prev];
+        const lastMsg = updated[updated.length - 1];
+        if (lastMsg && lastMsg.role === 'assistant' && !lastMsg.isSystem) {
+          updated[updated.length - 1] = { ...lastMsg, content: text.slice(0, i + 1) };
+        }
+        return updated;
       });
-      if (!response.ok) throw new Error(`API error: ${response.status}`);
-      const data = await response.json();
-      const reply = data.candidates?.[0]?.content?.parts?.[0]?.text?.trim() || 'No response.';
-      const jsonMatch = reply.match(/\[[\s\S]*\]/);
-      if (jsonMatch) {
+      i++;
+      if (i >= text.length) {
+        clearInterval(typingIntervalRef.current);
+        typingIntervalRef.current = null;
+      }
+    }, 18);
+  };
+
+  // ========== AI ASSISTANT AGENT LOGIC — V5.0 PARALLEL ARRAY MODEL ==========
+  const sendAssistantMessage = async () => {
+    if (!assistantInput.trim() || assistantLoading) return;
+
+    // Stop mic if still running — text stays in box
+    if (recognitionRunningRef.current) {
+      try { recognitionRef.current.stop(); } catch (e) {}
+    }
+
+    const userMessage = { role: 'user', content: assistantInput.trim() };
+    // Capture full history BEFORE state update — preserves chat continuity for API
+    const historyForApi = [...assistantMessages, userMessage];
+
+    setAssistantMessages(prev => [...prev, userMessage]);
+    setAssistantInput('');
+    setAssistantLoading(true);
+
+    try {
+      const apiKey = process.env.REACT_APP_GROQ_KEY;
+      const groq = new OpenAI({ apiKey, baseURL: "https://api.groq.com/openai/v1", dangerouslyAllowBrowser: true });
+
+      // Build snapshot — include IDs so AI can reference them for edits/deletes
+      const pendingTasksList   = tasks.filter(t => !t.completed).map(t => `[id:${t.id}] ${t.text}`);
+      const completedTasksList  = tasks.filter(t => t.completed).map(t => t.text);
+      const allCourseworkList   = coursework.map(c => `[id:${c.id}] ${c.text} (${c.type}, due ${c.deadline} ${c.dueTime || ''}, done:${c.completed})`);
+      const upcomingExamsList   = exams.filter(e => e.date >= todayISO).map(e => `[id:${e.id}] ${e.subject} on ${e.date} at ${e.startTime}`);
+      const allLecturesList     = lectures.map(l => `[id:${l.id}] ${l.subject} ${l.day} ${l.startTime}-${l.endTime} ${l.venue}`);
+      const allRevisionsList    = revisions.map(r => `[id:${r.id}] ${r.subject} ${r.day} ${r.startTime}-${r.endTime}`);
+      const focusStats          = `Total sessions: ${sessionsCompleted}, today: ${sessionsToday}`;
+      const recentFocusList     = focusHistory.slice(0,5).map(f => `${f.subjectName} (${f.duration}min) ${new Date(f.timestamp).toLocaleDateString()}`);
+
+      // ── LIVE DATE CONTEXT injected fresh on every request ──────────────────
+      const now_dt     = new Date();
+      const todayFull  = now_dt.toLocaleDateString('en-US', { weekday: 'long', year: 'numeric', month: 'long', day: 'numeric' });
+      // Pre-compute the next 7 day names so the AI can resolve "tomorrow", "in 3 days" etc.
+      const DAY_NAMES  = ['Sunday','Monday','Tuesday','Wednesday','Thursday','Friday','Saturday'];
+      const dayOffsets = Array.from({ length: 7 }, (_, i) => {
+        const d = new Date(now_dt); d.setDate(d.getDate() + i);
+        return `+${i}d = ${DAY_NAMES[d.getDay()]} (${d.toISOString().split('T')[0]})`;
+      }).join(', ');
+
+      const systemContent = `You are FocusFlow AI Assistant — an intelligent, friendly study partner built into a student productivity PWA. You have live access to the user's full schedule data. Be concise, warm, and motivational.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+LIVE DATE & TIME CONTEXT
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+Right now it is: ${todayFull}
+Today (ISO):     ${todayISO}
+Today (name):    ${todayName}
+Day look-ahead:  ${dayOffsets}
+
+Use this table to resolve ALL relative terms the user says:
+  "today"     → ${todayName}
+  "tomorrow"  → ${DAY_NAMES[new Date(now_dt.getTime() + 86400000).getDay()]}
+  "next [day]" → resolve from the look-ahead table above
+NEVER leave the "day" field as an ISO date string (e.g. "2026-04-29"). It MUST be a Day of the Week name.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+RULE 1 — WHEN TO USE JSON (NON-NEGOTIABLE)
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+• ONLY output a JSON block when the user explicitly asks to ADD, EDIT, or DELETE something.
+• Pure chat, questions, advice, or motivation → respond with PLAIN TEXT ONLY. No JSON, no code blocks, no exceptions.
+• NEVER emit a JSON block for a normal conversational reply — it triggers a confirmation card the user didn't ask for.
+• If the user's request is missing a mandatory field (e.g. no time given for a lecture), ask them for that specific detail in plain text BEFORE emitting any JSON. Do NOT guess or leave mandatory fields blank.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+RULE 2 — TESTS vs EXAMS (ABSOLUTELY CRITICAL — NEVER MIX THESE UP)
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+• TEST = class quiz, weekly test, mid-term, any in-class assessment
+  → action: "add_test" → stored in Coursework with type "Test"
+  → MANDATORY fields: text (name), deadline (YYYY-MM-DD), dueTime (HH:MM)
+  ❌ NEVER use add_exam for a test. ❌ NEVER use add_test for a final exam.
+
+• EXAM = official final examination with a calendar date (end-of-semester, board exam)
+  → action: "add_exam" → stored in Exams section
+  → MANDATORY fields: subject, date (YYYY-MM-DD), startTime (HH:MM), endTime (HH:MM), venue
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+RULE 2B — INTELLIGENT FEATURE MAPPING (SMART CATEGORISER — NON-NEGOTIABLE)
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+Every student activity MUST go into the CORRECT section. Use this exact mapping:
+
+COURSEWORK SECTION → action: "add_coursework"
+  Use for: Assignments, Tests (class/weekly/mid-term), Discussions, Projects
+  • "Ethics Assignment"  → action: add_coursework, type: "Assignment"
+  • "Math Test"          → action: add_coursework, type: "Test"  (NOT add_exam — see RULE 2)
+  • "Forum Discussion"   → action: add_coursework, type: "Discussion"
+  • "Group Project"      → action: add_coursework, type: "Project"
+  Mandatory fields: text ✱, type ✱, deadline (YYYY-MM-DD) ✱
+  NEVER use add_lecture, add_revision, or add_task for these.
+
+REVISION SECTION → action: "add_revision"
+  Use ONLY for: personal self-study / reading sessions (the student studies alone)
+  • "Study for Ethics tonight" → add_revision
+  • "Read Chapter 5 on Monday" → add_revision
+  Do NOT use this for official class slots or assignments.
+
+LECTURES SECTION → action: "add_lecture"
+  Use for: official university classes, timetable slots, seminars
+  • "I have Graphics class on Monday at 8am" → add_lecture
+  Do NOT use this for personal study.
+
+TASKS SECTION → action: "add_task"
+  Use ONLY for: general reminders and errands (no academic weight)
+  • "Buy a notebook" → add_task
+  • "Print assignment" → add_task
+  Do NOT use this for academic activities that belong in Coursework or Revision.
+
+EXAMS SECTION → action: "add_exam"
+  Use ONLY for: official final exams / board exams (see RULE 2).
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+RULE 3 — DAY-OF-WEEK IS SACRED (for lectures & revisions)
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+The app filters the Daily Flow with: items.filter(i => i.day === currentDayName)
+If the "day" field is ANYTHING other than a Day of the Week name, the item will be invisible.
+
+✅ CORRECT:  "day": "Thursday"
+❌ WRONG:    "day": "2026-05-01"   ← ISO date — item will NEVER appear on Daily Flow
+❌ WRONG:    "day": "tomorrow"     ← plain text — item will NEVER appear on Daily Flow
+❌ WRONG:    "day": ""             ← empty — item will NEVER appear on Daily Flow
+
+Conversion rule: take the calendar date → look it up in the Day look-ahead table above → use ONLY the Day name string.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+RULE 4 — MANDATORY FIELDS PER ACTION (missing = ask the user, never guess)
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+add_lecture   → subject ✱, day (Day of Week) ✱, startTime (HH:MM) ✱, endTime (HH:MM) ✱, venue ✱
+add_revision  → subject ✱, day (Day of Week) ✱, startTime (HH:MM) ✱, endTime (HH:MM) ✱
+add_exam      → subject ✱, date (YYYY-MM-DD) ✱, startTime (HH:MM) ✱, endTime (HH:MM) ✱, venue ✱
+add_test      → text ✱, deadline (YYYY-MM-DD) ✱, dueTime (HH:MM) ✱
+add_task      → text ✱
+add_coursework→ text ✱, type ("Assignment"|"Test"|"Discussion"|"Project") ✱, deadline (YYYY-MM-DD) ✱, dueTime (HH:MM)
+start_focus   → subject ✱, minutes ✱
+
+If ANY field marked ✱ is unknown, respond in plain text asking for ONLY the missing field(s). Never emit JSON with blank/null mandatory fields.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+RULE 5 — BATCH ARRAY FORMAT (ALWAYS use an array, even for 1 item)
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+All actions MUST be returned inside a single JSON array. Each object must have:
+  - "batchId": unique integer (1, 2, 3…)
+  - "action": string (see schemas below)
+  - "data": object with ALL required fields filled
+
+Output your friendly text explanation FIRST, then the JSON array.
+The app shows a separate confirmation card per item — the user can confirm or cancel each one independently. NEVER say the item was saved.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+REAL-WORLD SCENARIO EXAMPLES
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+SCENARIO A — Day translation (today is ${todayName}):
+User: "Add a Graphics lecture tomorrow at 8am to 10am in Room J1"
+→ "tomorrow" resolves to ${DAY_NAMES[new Date(now_dt.getTime() + 86400000).getDay()]} from the look-ahead table.
+\`\`\`json
+[
+  { "batchId": 1, "action": "add_lecture", "data": { "subject": "Graphics", "day": "${DAY_NAMES[new Date(now_dt.getTime() + 86400000).getDay()]}", "startTime": "08:00", "endTime": "10:00", "venue": "Room J1" } }
+]
+\`\`\`
+
+SCENARIO B — Missing mandatory field:
+User: "Add a Maths lecture on Friday"
+→ startTime and endTime are missing. Ask in plain text:
+"Sure! What time does the Maths lecture start and end on Friday?"
+(No JSON emitted until the user replies with the times.)
+
+SCENARIO C — The Deadline Crunch (mixed Test + Exam):
+User: "I have a Graphics Test tomorrow at 10am and a Science Exam on Friday at 2pm"
+→ Return TWO objects: one add_test (Graphics Test → Coursework), one add_exam (Science → Exams).
+\`\`\`json
+[
+  { "batchId": 1, "action": "add_test", "data": { "text": "Graphics Test", "deadline": "${new Date(now_dt.getTime() + 86400000).toISOString().split('T')[0]}", "dueTime": "10:00" } },
+  { "batchId": 2, "action": "add_exam", "data": { "subject": "Science Exam", "date": "${DAY_NAMES[(now_dt.getDay() + (5 - now_dt.getDay() + 7) % 7) % 7] ? new Date(now_dt.getTime() + ((5 - now_dt.getDay() + 7) % 7) * 86400000).toISOString().split('T')[0] : ''}", "startTime": "14:00", "endTime": "16:00", "venue": "" } }
+]
+\`\`\`
+
+SCENARIO D — The Schedule Reset (batch deletes):
+User: "Clear all my Wednesday lectures"
+→ Look up all Wednesday lectures from the snapshot. Return a delete action per item.
+\`\`\`json
+[
+  { "batchId": 1, "action": "delete_lecture", "data": { "id": 1111111111, "label": "Graphics & Animation — Wednesday 08:00" } }
+]
+\`\`\`
+
+SCENARIO E — The Proactive Adjustment (edit + add simultaneously):
+User: "Move my 4pm Library session to 5pm and remind me to pick up my printed coursework"
+\`\`\`json
+[
+  { "batchId": 1, "action": "edit_revision", "data": { "id": 3333333333, "fields": { "startTime": "17:00", "endTime": "18:00" } } },
+  { "batchId": 2, "action": "add_task",      "data": { "text": "Pick up printed coursework" } }
+]
+\`\`\`
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+FULL ACTION SCHEMA REFERENCE
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+add_revision:     { subject, day (Day of Week ✱), startTime, endTime }
+add_lecture:      { subject, day (Day of Week ✱), startTime, endTime, venue }
+add_exam:         { subject, date (YYYY-MM-DD), startTime, endTime, venue }
+add_test:         { text, deadline (YYYY-MM-DD), dueTime }
+add_task:         { text }
+add_coursework:   { text, type ("Assignment"|"Test"|"Discussion"|"Project"), deadline, dueTime }
+start_focus:      { subject, minutes }
+edit_task:        { id, newText }
+edit_coursework:  { id, fields: { text?, deadline?, dueTime?, type? } }
+edit_exam:        { id, fields: { subject?, date?, startTime?, endTime?, venue? } }
+edit_revision:    { id, fields: { subject?, startTime?, endTime?, day?, venue? } }
+delete_task:      { id, label }
+delete_coursework:{ id, label }
+delete_exam:      { id, label }
+delete_lecture:   { id, label }
+delete_revision:  { id, label }
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+CURRENT APP SNAPSHOT (use IDs for edits/deletes)
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+Tasks pending:    ${pendingTasksList.length   ? pendingTasksList.join(' | ')   : 'None'}
+Tasks completed:  ${completedTasksList.length ? completedTasksList.join(', ')  : 'None'}
+Coursework:       ${allCourseworkList.length  ? allCourseworkList.join(' | ')  : 'None'}
+Exams upcoming:   ${upcomingExamsList.length  ? upcomingExamsList.join(' | ')  : 'None'}
+Lectures:         ${allLecturesList.length    ? allLecturesList.join(' | ')    : 'None'}
+Revisions:        ${allRevisionsList.length   ? allRevisionsList.join(' | ')   : 'None'}
+Focus stats:      ${focusStats}
+Recent sessions:  ${recentFocusList.length   ? recentFocusList.join(' | ')    : 'None'}
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━`;
+
+      const messages = [
+        { role: 'system', content: systemContent },
+        ...historyForApi.filter(m => m.role !== 'system')
+      ];
+
+      const completion = await groq.chat.completions.create({
+        model: "llama-3.3-70b-versatile",
+        messages,
+        temperature: 0.65,
+        max_tokens: 1000,
+      });
+
+      const fullReply = completion.choices[0].message.content;
+
+      // ── DUAL-PASS JSON EXTRACTION ──────────────────────────────────────────
+      // Pass 1: fenced  ```json [ … ] ```   Pass 2: bare  [ … ]
+      const fencedRegex = /```(?:json)?\s*(\[[\s\S]*?\])\s*```/;
+      const bareRegex   = /(\[[\s\S]*?\])/;
+      const fencedMatch = fullReply.match(fencedRegex);
+      const bareMatch   = fullReply.match(bareRegex);
+      const activeMatch = fencedMatch || bareMatch;
+      const rawJson     = activeMatch ? activeMatch[1] : null;
+
+      let parsedActions = [];
+      let cleanText = fullReply;
+
+      if (rawJson) {
         try {
-          const updated = JSON.parse(jsonMatch[0]);
-          if (Array.isArray(updated) && updated.length > 0) {
-            setImportResult(updated);
-            setChatMessages(prev => [...prev, { role: 'assistant', content: `I've updated your timetable.` }]);
-            return;
+          const arr = JSON.parse(rawJson);
+          if (Array.isArray(arr) && arr.length > 0 && arr.every(a => a && typeof a.action === 'string')) {
+
+            // ── AUTO-CORRECTOR: fix any data.day that slipped through as an ISO date ──
+            const DAY_NAMES_LOCAL = ['Sunday','Monday','Tuesday','Wednesday','Thursday','Friday','Saturday'];
+            const sanitisedArr = arr.map(a => {
+              if (!a.data || typeof a.data.day !== 'string') return a;
+              const raw = a.data.day.trim();
+              // If it looks like a date string (contains digits and hyphens, e.g. "2026-04-30")
+              if (/\d{4}-\d{2}-\d{2}/.test(raw) || /\d{1,2}[/-]\d{1,2}/.test(raw)) {
+                const parsed = new Date(raw);
+                if (!isNaN(parsed.getTime())) {
+                  const corrected = DAY_NAMES_LOCAL[parsed.getDay()];
+                  console.info(`[FocusFlow] Auto-corrected day: "${raw}" → "${corrected}"`);
+                  return { ...a, data: { ...a.data, day: corrected } };
+                }
+              }
+              return a;
+            });
+
+            parsedActions = sanitisedArr.map((a, i) => ({ ...a, batchId: Date.now() + i }));
+            // Strip the JSON block from the visible text
+            cleanText = fencedMatch
+              ? fullReply.replace(fencedRegex, '').trim()
+              : fullReply.replace(bareRegex,   '').trim();
           }
-        } catch {}
+        } catch (e) {
+          console.warn('JSON parse error in AI response:', e);
+          cleanText = fullReply; // show raw text on parse failure — never blank bubble
+        }
       }
-      setChatMessages(prev => [...prev, { role: 'assistant', content: reply }]);
-    } catch (error) { setChatMessages(prev => [...prev, { role: 'assistant', content: 'Sorry, something went wrong.' }]); }
-    finally { setIsChatLoading(false); }
+
+      if (!cleanText) cleanText = 'Got it! Review the cards below 👆';
+
+      // Push clean text to chat IMMEDIATELY — independent of cards
+      setAssistantMessages(prev => [...prev, { role: 'assistant', content: '' }]);
+      simulateTyping(cleanText);
+
+      // Append action cards — never touches assistantMessages
+      if (parsedActions.length > 0) {
+        setPendingActions(prev => [...prev, ...parsedActions]);
+      }
+
+    } catch (error) {
+      console.error('AI Assistant error:', error);
+      setAssistantMessages(prev => [...prev, { role: 'assistant', content: 'Connection issue — please try again.' }]);
+    } finally {
+      // Always unblock input
+      setAssistantLoading(false);
+    }
   };
 
-  const clearChatHistory = () => { setChatMessages([]); };
+  const clearAssistantHistory = () => {
+    if (typingIntervalRef.current) clearInterval(typingIntervalRef.current);
+    // RECORDER RESET: stop mic if running
+    if (recognitionRunningRef.current) {
+      try { recognitionRef.current.stop(); } catch (e) {}
+    }
+    setIsListening(false);
+    recognitionRunningRef.current = false;
+    setAssistantMessages([
+      { role: 'assistant', content: "Chat cleared! How can I help you?" }
+    ]);
+    setPendingActions([]);
+  };
 
-  // --- RENDER --- (authLoading / login unchanged)
+  // BATCH: confirm a single action by batchId — removes only that card, chat stays intact
+  const confirmAction = (batchId) => {
+    const item = pendingActions.find(a => a.batchId === batchId);
+    if (!item || !user) return;
+    const { action, data } = item;
+    switch (action) {
+      case 'add_revision':      addRevisionFromAgent(data);               break;
+      case 'add_lecture':       addLectureFromAgent(data);                break;
+      case 'add_exam':          addExamFromAgent(data);                   break;
+      case 'add_test':          addTestFromAgent(data);                   break;
+      case 'add_task':          addTaskFromAgent(data.text);              break;
+      case 'add_coursework':    addCourseworkFromAgent(data);             break;
+      case 'start_focus':       setupFocusTimerFromAgent(data.subject, data.minutes); break;
+      case 'edit_task':         editTaskFromAgent(data.id, data.newText); break;
+      case 'edit_coursework':   editCourseworkFromAgent(data.id, data.fields); break;
+      case 'edit_exam':         editExamFromAgent(data.id, data.fields);  break;
+      case 'edit_revision':     editRevisionFromAgent(data.id, data.fields); break;
+      case 'delete_task':       deleteTaskFromAgent(data.id);             break;
+      case 'delete_coursework': deleteCourseworkFromAgent(data.id);       break;
+      case 'delete_exam':       deleteExamFromAgent(data.id);             break;
+      case 'delete_lecture':    deleteLectureFromAgent(data.id);          break;
+      case 'delete_revision':   deleteRevisionFromAgent(data.id);         break;
+      default: console.warn("Unknown action:", action);
+    }
+    // Remove only this card — all other cards and full chat history remain intact
+    setPendingActions(prev => prev.filter(a => a.batchId !== batchId));
+  };
+
+  // BATCH: dismiss a single action by batchId — card vanishes, chat untouched
+  const dismissAction = (batchId) => {
+    setPendingActions(prev => prev.filter(a => a.batchId !== batchId));
+  };
+
+  // --- RENDER ---
   if (authLoading) {
     return (
       <div className="auth-loading">
@@ -943,7 +1111,6 @@ ${importFileText}`;
       </header>
 
       <main className="content">
-        {/* HOME, TIMETABLE, AI_GEN, IMPORT_TIMETABLE, ACADEMIC, TASKS, FOCUS screens */}
         {currentScreen === 'HOME' && (
           <div className="magic-flow-container">
             <h4 className="section-label">TODAY'S FLOW ({todayName.toUpperCase()})</h4>
@@ -973,11 +1140,6 @@ ${importFileText}`;
             </div>
             {ttTab === 'REVISION' && (
               <button className="ai-gen-btn" onClick={() => setCurrentScreen('AI_GEN')}>✨ GENERATE WITH AI</button>
-            )}
-            {ttTab !== 'REVISION' && (
-              <button className="ai-gen-btn" onClick={() => { setImportTargetTab(ttTab); setCurrentScreen('IMPORT_TIMETABLE'); }}>
-                📤 IMPORT FROM GENERAL TIMETABLE
-              </button>
             )}
             <div className="form-container">
               <h4 className="input-header">{editingId ? 'EDIT' : 'ADD NEW'} {ttTab}</h4>
@@ -1050,130 +1212,121 @@ ${importFileText}`;
           </div>
         )}
 
-        {currentScreen === 'IMPORT_TIMETABLE' && (
-          <div className="center-view">
-            <button className="back-btn" onClick={() => setCurrentScreen('TIMETABLE')}>← Back to Timetable</button>
-            <h4 className="section-label">IMPORT FROM TIMETABLE ({importTargetTab === 'EXAMS' ? 'Exams' : 'Lectures'})</h4>
-            <div className="form-container">
-              <div className="input-group"><label>YOUR COURSE</label><input placeholder="e.g. Bachelor of Information Technology" value={importCourse} onChange={e => setImportCourse(e.target.value)} className="neon-input" /></div>
-              <div className="input-group"><label>YOUR YEAR</label><input placeholder="e.g. Year 2" value={importYear} onChange={e => setImportYear(e.target.value)} className="neon-input" /></div>
-              <div className="input-group">
-                <label>UPLOAD TIMETABLE FILE (CSV / EXCEL)</label>
-                {/* Redesigned upload zone */}
-                <div
-                  className="upload-zone"
-                  onClick={() => fileInputRef.current && fileInputRef.current.click()}
-                  style={{
-                    border: '2px dashed rgba(0, 255, 249, 0.4)',
-                    borderRadius: '12px',
-                    padding: '20px',
-                    textAlign: 'center',
-                    cursor: 'pointer',
-                    background: 'rgba(0, 255, 249, 0.03)',
-                    transition: 'all 0.2s',
-                    marginBottom: '15px'
-                  }}
-                  onMouseOver={(e) => e.currentTarget.style.borderColor = 'var(--neon)'}
-                  onMouseOut={(e) => e.currentTarget.style.borderColor = 'rgba(0, 255, 249, 0.4)'}
-                >
-                  <span style={{ fontSize: '2rem' }}>📎</span>
-                  <p style={{ color: '#aaa', margin: '10px 0 0' }}>
-                    {importFileName ? importFileName : 'Click to choose timetable file (.xlsx, .csv)'}
-                  </p>
-                </div>
-                <input
-                  type="file"
-                  accept=".csv,.xlsx,.xls"
-                  onChange={handleFileChange}
-                  ref={fileInputRef}
-                  style={{ display: 'none' }}
-                />
-                {/* Upload progress bar */}
-                {uploadProgress > 0 && !isImporting && (
-                  <div className="progress-bar" style={{ marginBottom: '15px' }}>
-                    <div className="progress-fill" style={{ width: `${uploadProgress}%`, background: 'var(--neon)', height: '100%', borderRadius: '2px', transition: 'width 0.3s' }}></div>
-                  </div>
-                )}
-                {importFileName && !isImporting && (
-                  <div style={{ display: 'flex', justifyContent: 'flex-end', marginBottom: '10px' }}>
-                    <button onClick={clearFile} style={{ background: 'rgba(255,0,0,0.1)', border: '1px solid #f44', color: '#f44', borderRadius: '8px', padding: '6px 12px', cursor: 'pointer', fontWeight: 'bold', fontSize: '0.8rem' }}>✕</button>
-                  </div>
-                )}
+        {/* ===== AI ASSISTANT SCREEN ===== */}
+        {currentScreen === 'AI_ASSISTANT' && (
+          <div className="ai-assistant-panel">
+            <div className="glass-panel">
+
+              <div className="assistant-header">
+                <div className="assistant-avatar">✨</div>
+                <h4>FocusFlow AI Assistant</h4>
               </div>
-              {/* Import button or animated state */}
-              {isImporting ? (
-                <div className="ai-analysing" style={{
-                  background: 'linear-gradient(90deg, #7000ff, #00fff9, #ff00ea)',
-                  backgroundSize: '200% 200%',
-                  animation: 'aiPulse 2s ease infinite',
-                  WebkitBackgroundClip: 'text',
-                  WebkitTextFillColor: 'transparent',
-                  backgroundClip: 'text',
-                  textFillColor: 'transparent',
-                  fontSize: '1.1rem',
-                  fontWeight: 'bold',
-                  textAlign: 'center',
-                  padding: '15px 0',
-                  marginBottom: '15px'
-                }}>
-                  AI is reading your timetable...
-                </div>
-              ) : (
-                <button className="action-btn main" onClick={runImport} disabled={!importFileText}>
-                  🚀 IMPORT TIMETABLE
+
+              <div className="chat-messages-glass" ref={chatContainerRef}>
+                {assistantMessages.map((msg, idx) => (
+                  <div key={idx} className={`message-wrapper ${msg.role} ${msg.isSystem ? 'system' : ''}`}>
+                    <div className="message-bubble">
+                      {msg.role === 'assistant' && !msg.isSystem && <span className="ai-icon">🧠</span>}
+                      <span className="message-text">{msg.content}</span>
+                    </div>
+                  </div>
+                ))}
+                {assistantLoading && (assistantMessages.length === 0 || assistantMessages[assistantMessages.length - 1]?.role !== 'assistant') && (
+                  <div className="message-wrapper assistant">
+                    <div className="message-bubble typing-indicator">
+                      <span>✨</span> Thinking...
+                    </div>
+                  </div>
+                )}
+                <div ref={assistantEndRef} />
+              </div>
+
+              {/* Input area — recorder-style mic */}
+              <div className="input-area">
+                <textarea
+                  placeholder={isListening ? "Listening... Tap mic to stop" : "Ask me anything or say 'add a task...'"}
+                  value={assistantInput}
+                  rows={1}
+                  onChange={e => {
+                    if (!isListening) {
+                      setAssistantInput(e.target.value);
+                      // Auto-expand up to 5 lines
+                      e.target.style.height = 'auto';
+                      const lineHeight = 20;
+                      const maxHeight = lineHeight * 5;
+                      e.target.style.height = Math.min(e.target.scrollHeight, maxHeight) + 'px';
+                    }
+                  }}
+                  onKeyDown={e => {
+                    if (e.key === 'Enter' && !e.shiftKey && !isListening) {
+                      e.preventDefault();
+                      sendAssistantMessage();
+                      // Reset height after send
+                      e.target.style.height = 'auto';
+                    }
+                  }}
+                  className={`glass-input${isListening ? ' listening-placeholder' : ''}`}
+                />
+                {/* Google-style minimalist SVG mic — neon glow when listening */}
+                <button
+                  onClick={toggleListening}
+                  className={`mic-btn${isListening ? ' listening' : ''}`}
+                  title={isListening ? "Tap to stop recording" : "Tap to start voice input"}
+                  disabled={assistantLoading}
+                  aria-label="Voice input"
+                >
+                  <svg width="18" height="22" viewBox="0 0 18 22" fill="none" xmlns="http://www.w3.org/2000/svg">
+                    <rect x="5" y="1" width="8" height="13" rx="4" stroke="currentColor" strokeWidth="1.8" fill="none"/>
+                    <path d="M1 11C1 15.418 4.582 19 9 19C13.418 19 17 15.418 17 11" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round"/>
+                    <line x1="9" y1="19" x2="9" y2="21" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round"/>
+                    <line x1="6" y1="21" x2="12" y2="21" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round"/>
+                  </svg>
                 </button>
-              )}
-              {importError && <p style={{ color: '#f44', marginTop: '10px', textAlign: 'center' }}>{importError}</p>}
+                <button onClick={sendAssistantMessage} className="send-btn" disabled={assistantLoading || isListening}>➤</button>
+              </div>
+
+              {/* Clear chat at very bottom */}
+              <div className="clear-chat-row">
+                <button onClick={clearAssistantHistory} className="clear-chat-btn">🗑️ Clear Chat</button>
+              </div>
             </div>
 
-            {importResult.length > 0 && (
-              <>
-                <div className="recommendations-container" style={{ marginTop: '20px' }}>
-                  <h4 className="section-label">EXTRACTED CLASSES ({importResult.length})</h4>
-                  {importResult.map((entry, idx) => (
-                    <div key={idx} className="recommendation-card neon-card" style={{ padding: '10px 15px', paddingTop: '10px' }}>
-                      <div className="rec-header" style={{ marginBottom: '5px' }}>
-                        <span className="rec-subject" style={{ fontSize: '1rem' }}>{entry.subject}</span>
-                        <span className="rec-time" style={{ fontSize: '0.7rem' }}>
-                          {importTargetTab === 'EXAMS' ? (entry.date || 'No date') : entry.day} {entry.startTime} – {entry.endTime}
-                        </span>
-                      </div>
-                      <div className="rec-details" style={{ display: 'flex', gap: '15px', fontSize: '0.7rem', color: '#aaa', marginTop: '3px' }}>
-                        <span>👨‍🏫 {entry.lecturer || 'N/A'}</span>
-                        <span>🏫 {entry.room || 'N/A'}</span>
-                      </div>
-                      <div style={{ display: 'flex', gap: '10px', marginTop: '8px', justifyContent: 'flex-end' }}>
-                        <button onClick={() => removeImportedClass(idx)} style={{ background: 'transparent', border: '2px solid #f44', color: '#f44', width: '36px', height: '36px', borderRadius: '50%', fontSize: '1.3rem', fontWeight: 'bold', cursor: 'pointer', display: 'flex', alignItems: 'center', justifyContent: 'center', transition: 'all 0.2s' }}
-                          onMouseOver={(e) => { e.target.style.background = '#f44'; e.target.style.color = '#000'; }}
-                          onMouseOut={(e) => { e.target.style.background = 'transparent'; e.target.style.color = '#f44'; }}>
-                          ✕
-                        </button>
-                        <button className="rec-add-btn" style={{ width: '36px', height: '36px', fontSize: '1.5rem' }} onClick={() => addImportedLecture(entry)}>+</button>
-                      </div>
+            {/* BATCH Safe-Way cards — one card per pending action, each dismissable independently */}
+            {pendingActions.length > 0 && (
+              <div className="confirmation-cards-stack">
+                {pendingActions.map((item) => (
+                  <div key={item.batchId} className="confirmation-card">
+                    <div className="confirmation-header">
+                      <span className="confirm-action-type">
+                        {item.action.startsWith('delete') ? '🗑️ Confirm Delete' :
+                         item.action.startsWith('edit') ? '✏️ Confirm Edit' : '✨ Confirm Add'}
+                      </span>
                     </div>
-                  ))}
-                </div>
-
-                <div className="chat-container" style={{ marginTop: '30px' }}>
-                  <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-                    <h4 className="section-label" style={{ margin: 0 }}>CHAT WITH AI</h4>
-                    <button className="cancel-btn" style={{ width: 'auto', padding: '4px 12px', fontSize: '0.7rem' }} onClick={clearChatHistory}>🗑️ Clear Chat</button>
+                    <div className="confirmation-details">
+                      {item.action === 'add_revision' && (<><p><b>{item.data.subject}</b> — Revision</p><p>{item.data.day || todayName} · {item.data.startTime}–{item.data.endTime}</p>{item.data.venue && <p className="conf-meta">{item.data.venue}</p>}</>)}
+                      {item.action === 'add_lecture' && (<><p><b>{item.data.subject}</b> — Lecture</p><p>{item.data.day} · {item.data.startTime}–{item.data.endTime}</p>{item.data.venue && <p className="conf-meta">{item.data.venue}</p>}</>)}
+                      {item.action === 'add_exam' && (<><p><b>{item.data.subject}</b> — Exam</p><p>{item.data.date} · {item.data.startTime}–{item.data.endTime}</p></>)}
+                      {item.action === 'add_test' && (<><p><b>{item.data.text}</b> — Test</p><p>Due {item.data.deadline}{item.data.dueTime ? ` at ${item.data.dueTime}` : ''}</p></>)}
+                      {item.action === 'add_task' && (<p><b>Task:</b> {item.data.text}</p>)}
+                      {item.action === 'add_coursework' && (<><p><b>{item.data.text}</b> — {item.data.type}</p><p>Due {item.data.deadline}{item.data.dueTime ? ` at ${item.data.dueTime}` : ''}</p></>)}
+                      {item.action === 'start_focus' && (<><p><b>{item.data.subject}</b></p><p>{item.data.minutes} min focus session</p></>)}
+                      {item.action === 'edit_task' && (<><p><b>Edit task</b></p><p>New: "{item.data.newText}"</p></>)}
+                      {item.action === 'edit_coursework' && (<><p><b>Edit coursework</b></p><p>{JSON.stringify(item.data.fields)}</p></>)}
+                      {item.action === 'edit_exam' && (<><p><b>Edit exam</b></p><p>{JSON.stringify(item.data.fields)}</p></>)}
+                      {item.action === 'edit_revision' && (<><p><b>Edit revision</b></p><p>{JSON.stringify(item.data.fields)}</p></>)}
+                      {item.action === 'delete_task' && (<p>Delete: <b>"{item.data.label}"</b></p>)}
+                      {item.action === 'delete_coursework' && (<p>Delete: <b>"{item.data.label}"</b></p>)}
+                      {item.action === 'delete_exam' && (<p>Delete exam: <b>"{item.data.label}"</b></p>)}
+                      {item.action === 'delete_lecture' && (<p>Delete lecture: <b>"{item.data.label}"</b></p>)}
+                      {item.action === 'delete_revision' && (<p>Delete revision: <b>"{item.data.label}"</b></p>)}
+                    </div>
+                    <div className="confirmation-buttons">
+                      <button className="confirm-yes" onClick={() => confirmAction(item.batchId)}>✓ Confirm</button>
+                      <button className="confirm-no" onClick={() => dismissAction(item.batchId)}>✗ Cancel</button>
+                    </div>
                   </div>
-                  <div className="chat-messages" style={{ maxHeight: '300px', overflowY: 'auto', padding: '10px', background: 'rgba(0,0,0,0.3)', borderRadius: '12px', marginBottom: '10px', display: 'flex', flexDirection: 'column' }}>
-                    {chatMessages.filter(m => m.role !== 'system').map((msg, idx) => (
-                      <div key={idx} style={{ margin: '8px 0', alignSelf: msg.role === 'user' ? 'flex-end' : 'flex-start', maxWidth: '80%' }}>
-                        <span style={{ background: msg.role === 'user' ? 'var(--neon)' : '#333', color: msg.role === 'user' ? '#000' : '#fff', padding: '8px 14px', borderRadius: '12px', display: 'inline-block' }}>{msg.content}</span>
-                      </div>
-                    ))}
-                    {isChatLoading && <p style={{ color: '#888' }}>AI thinking...</p>}
-                    <div ref={chatEndRef} />
-                  </div>
-                  <div style={{ display: 'flex', gap: '10px' }}>
-                    <input placeholder="Ask AI to add/remove classes..." value={chatInput} onChange={e => setChatInput(e.target.value)} onKeyPress={e => e.key === 'Enter' && sendChatMessage()} className="neon-input" style={{ flex: 1 }} />
-                    <button onClick={sendChatMessage} className="add-btn" disabled={isChatLoading}>➤</button>
-                  </div>
-                </div>
-              </>
+                ))}
+              </div>
             )}
           </div>
         )}
@@ -1299,13 +1452,13 @@ ${importFileText}`;
 
       <nav className="nav-bar">
         <button onClick={() => setCurrentScreen('HOME')} className={currentScreen === 'HOME' ? 'active' : ''}>🏠<span>Home</span></button>
-        <button onClick={() => setCurrentScreen('TIMETABLE')} className={currentScreen === 'TIMETABLE' || currentScreen === 'AI_GEN' || currentScreen === 'IMPORT_TIMETABLE' ? 'active' : ''}>📅<span>Timetables</span></button>
+        <button onClick={() => setCurrentScreen('TIMETABLE')} className={currentScreen === 'TIMETABLE' || currentScreen === 'AI_GEN' ? 'active' : ''}>📅<span>Timetables</span></button>
+        <button onClick={() => setCurrentScreen('AI_ASSISTANT')} className={currentScreen === 'AI_ASSISTANT' ? 'active' : ''}>✨<span>AI</span></button>
         <button onClick={() => setCurrentScreen('ACADEMIC')} className={currentScreen === 'ACADEMIC' ? 'active' : ''}>📄<span>Coursework</span></button>
         <button onClick={() => setCurrentScreen('TASKS')} className={currentScreen === 'TASKS' ? 'active' : ''}>✅<span>Tasks</span></button>
         <button onClick={() => setCurrentScreen('FOCUS')} className={currentScreen === 'FOCUS' ? 'active' : ''}>⏱️<span>Focus</span></button>
       </nav>
 
-      {/* Global styles */}
       <style>{`
         :root { --neon: #00fff9; --revision: #c471ed; --exam: #f39c12; --bg: #000; }
         body { margin: 0; background: var(--bg); color: #fff; font-family: 'Inter', sans-serif; }
@@ -1320,28 +1473,6 @@ ${importFileText}`;
         .progress-fill { height: 100%; width: 30%; background: linear-gradient(90deg, transparent, var(--neon), transparent); animation: shimmerMove 1.5s infinite; }
         @keyframes pulse { 0% { opacity: 0.5; transform: scale(1); } 50% { opacity: 1; transform: scale(1.1); text-shadow: 0 0 15px var(--neon); } 100% { opacity: 0.5; transform: scale(1); } }
         @keyframes shimmerMove { 0% { transform: translateX(-100%); } 100% { transform: translateX(400%); } }
-        /* New AI analysing animation */
-        @keyframes aiPulse {
-          0% { background-position: 0% 50%; opacity: 0.8; }
-          50% { background-position: 100% 50%; opacity: 1; }
-          100% { background-position: 0% 50%; opacity: 0.8; }
-        }
-        .ai-analysing {
-          animation: aiPulse 2s ease infinite;
-          font-size: 1.1rem;
-          font-weight: bold;
-          text-align: center;
-          padding: 15px 0;
-          margin-bottom: 15px;
-          background: linear-gradient(90deg, #7000ff, #00fff9, #ff00ea);
-          background-size: 200% 200%;
-          -webkit-background-clip: text;
-          -webkit-text-fill-color: transparent;
-          background-clip: text;
-          text-fill-color: transparent;
-        }
-        .upload-zone { transition: all 0.2s; }
-        .upload-zone:hover { border-color: var(--neon) !important; }
         .recommendations-container { margin-top: 10px; }
         .recommendation-card { padding: 20px; padding-top: 30px; margin-bottom: 15px; text-align: left; display: flex; flex-direction: column; position: relative; }
         .neon-card { background: rgba(0, 0, 0, 0.6) !important; border: 2px solid var(--neon) !important; box-shadow: 0 0 20px rgba(0, 255, 249, 0.3), inset 0 0 10px rgba(0, 255, 249, 0.1); backdrop-filter: blur(12px); transition: all 0.3s ease; border-radius: 20px !important; }
@@ -1354,9 +1485,6 @@ ${importFileText}`;
         .rec-reasoning { font-size: 0.8rem; color: #ccc; margin-bottom: 15px; line-height: 1.4; }
         .rec-add-btn { background: transparent; border: 2px solid var(--neon); color: var(--neon); width: 40px; height: 40px; border-radius: 50%; font-size: 1.8rem; font-weight: 300; display: flex; align-items: center; justify-content: center; cursor: pointer; margin-left: auto; transition: all 0.2s; }
         .rec-add-btn:hover { background: var(--neon); color: #000; box-shadow: 0 0 20px var(--neon); }
-        .chat-container { margin-top: 20px; }
-        .chat-messages::-webkit-scrollbar { width: 4px; }
-        .chat-messages::-webkit-scrollbar-thumb { background: var(--neon); border-radius: 2px; }
         .test-due-badge { display: block; font-size: 0.65rem; color: var(--exam); font-weight: 800; margin-top: 5px; }
         .cat-test .flow-category-tag { background: #e67e22; color: #000; }
         .flow-card-new, .task-card, .card-styled, .manage-item, .form-container { background: rgba(255, 255, 255, 0.03); border: 1px solid rgba(255, 255, 255, 0.08); backdrop-filter: blur(8px); -webkit-backdrop-filter: blur(8px); }
@@ -1415,10 +1543,10 @@ ${importFileText}`;
         .timer-btn.start { background: #fff; color: #000; padding: 12px 30px; font-size: 0.9rem; border-radius: 30px; box-shadow: 0 0 15px #fff; }
         .timer-btn.start.pause { background: rgba(255, 255, 255, 0.05); color: #fff; border: 1px solid rgba(255, 255, 255, 0.2); box-shadow: none; }
         .timer-btn.restart { background: rgba(255, 255, 255, 0.05); color: #888; border: 1px solid rgba(255, 255, 255, 0.1); }
-        .nav-bar { position: fixed; bottom: 30px; left: 50%; transform: translateX(-50%); background: rgba(10,10,10,0.95); border: 1px solid #222; padding: 12px 20px; border-radius: 50px; display: flex; gap: 10px; backdrop-filter: blur(15px); z-index: 100; }
-        .nav-bar button { background: none; border: none; color: #444; display: flex; flex-direction: column; align-items: center; min-width: 60px; cursor: pointer; }
+        .nav-bar { position: fixed; bottom: 20px; left: 50%; transform: translateX(-50%); background: rgba(10,10,10,0.95); border: 1px solid #222; padding: 8px 12px; border-radius: 40px; display: flex; gap: 4px; backdrop-filter: blur(15px); z-index: 100; width: auto; max-width: 90vw; justify-content: center; }
+        .nav-bar button { background: none; border: none; color: #444; display: flex; flex-direction: column; align-items: center; min-width: 44px; cursor: pointer; font-size: 0.8rem; }
+        .nav-bar button span { font-size: 0.45rem; font-weight: 800; margin-top: 4px; text-transform: uppercase; }
         .nav-bar button.active { color: var(--neon); text-shadow: 0 0 8px var(--neon); }
-        .nav-bar button span { font-size: 0.55rem; font-weight: 800; margin-top: 5px; text-transform: uppercase; }
         .tab-pill { display: flex; background: rgba(255, 255, 255, 0.03); padding: 4px; border-radius: 12px; margin-bottom: 20px; border: 1px solid rgba(255, 255, 255, 0.08); }
         .tab-pill button { flex: 1; background: none; color: #555; padding: 10px; border-radius: 8px; border: none; font-weight: 800; font-size: 0.7rem; cursor: pointer; }
         .tab-pill button.active { background: rgba(255, 255, 255, 0.1); color: var(--neon); }
@@ -1441,16 +1569,71 @@ ${importFileText}`;
         .timer-active .timer-progress { animation: timer-glow-pulse 2s ease-in-out infinite; stroke-width: 10; }
         .timer-progress { filter: drop-shadow(0 0 5px var(--neon)); transition: all 0.3s ease; }
         @keyframes timer-glow-pulse { 0% { filter: drop-shadow(0 0 5px var(--neon)); opacity: 1; } 50% { filter: drop-shadow(0 0 15px var(--neon)); opacity: 0.8; } 100% { filter: drop-shadow(0 0 5px var(--neon)); opacity: 1; } }
-        .profile-overlay { position: fixed; top: 0; left: 0; right: 0; bottom: 0; background: rgba(0,0,0,0.8); backdrop-filter: blur(12px); display: flex; align-items: center; justify-content: center; z-index: 200; padding: 20px; }
-        .profile-modal { width: 100%; max-width: 380px; padding: 30px 25px; text-align: center; position: relative; border: 1px solid var(--neon); box-shadow: 0 0 30px rgba(0, 255, 249, 0.3); }
-        .close-modal { position: absolute; top: 15px; right: 15px; background: none; border: none; color: #888; font-size: 1.2rem; cursor: pointer; }
-        .profile-modal h3 { color: var(--neon); margin-bottom: 20px; font-size: 1.4rem; text-shadow: 0 0 10px var(--neon); }
-        .profile-email { color: var(--neon); margin-bottom: 30px; word-break: break-all; font-size: 1rem; text-shadow: 0 0 5px var(--neon); }
-        .profile-btn { width: 100%; background: transparent; border: 1px solid rgba(255,255,255,0.2); color: #fff; padding: 14px; border-radius: 12px; font-weight: 700; margin-bottom: 12px; cursor: pointer; transition: all 0.2s; letter-spacing: 1px; }
-        .profile-btn.logout { border-color: #f44; color: #f44; box-shadow: 0 0 10px rgba(255, 68, 68, 0.3); }
-        .profile-btn.logout:hover { background: #f44; color: #000; box-shadow: 0 0 20px #f44; }
-        .profile-btn.danger { border-color: #ff3a6f; color: #ff3a6f; box-shadow: 0 0 10px rgba(255, 58, 111, 0.3); }
-        .profile-btn.danger:hover { background: #ff3a6f; color: #000; box-shadow: 0 0 20px #ff3a6f; }
+        .profile-overlay { position: fixed; top: 0; left: 0; right: 0; bottom: 0; background: rgba(0,0,0,0.8); backdrop-filter: blur(12px); display: flex; align-items: center; justify-content: center; z-index:200; padding:20px; }
+        .profile-modal { width:100%; max-width:380px; padding:30px 25px; text-align:center; position:relative; border:1px solid var(--neon); box-shadow:0 0 30px rgba(0,255,249,0.3); }
+        .close-modal { position:absolute; top:15px; right:15px; background:none; border:none; color:#888; font-size:1.2rem; cursor:pointer; }
+        .profile-modal h3 { color:var(--neon); margin-bottom:20px; font-size:1.4rem; text-shadow:0 0 10px var(--neon); }
+        .profile-email { color:var(--neon); margin-bottom:30px; word-break:break-all; font-size:1rem; text-shadow:0 0 5px var(--neon); }
+        .profile-btn { width:100%; background:transparent; border:1px solid rgba(255,255,255,0.2); color:#fff; padding:14px; border-radius:12px; font-weight:700; margin-bottom:12px; cursor:pointer; transition:all 0.2s; letter-spacing:1px; }
+        .profile-btn.logout { border-color:#f44; color:#f44; box-shadow:0 0 10px rgba(255,68,68,0.3); }
+        .profile-btn.logout:hover { background:#f44; color:#000; box-shadow:0 0 20px #f44; }
+        .profile-btn.danger { border-color:#ff3a6f; color:#ff3a6f; box-shadow:0 0 10px rgba(255,58,111,0.3); }
+        .profile-btn.danger:hover { background:#ff3a6f; color:#000; box-shadow:0 0 20px #ff3a6f; }
+
+        /* ===== AI ASSISTANT PANEL ===== */
+        .ai-assistant-panel { width: 100%; max-width: 480px; margin: 0 auto; padding: 20px; box-sizing: border-box; }
+        .glass-panel { background: rgba(20, 20, 30, 0.5); backdrop-filter: blur(20px); -webkit-backdrop-filter: blur(20px); border-radius: 32px; border: 1px solid rgba(0, 255, 249, 0.25); box-shadow: 0 8px 32px rgba(0, 0, 0, 0.3), 0 0 0 0.5px rgba(0, 255, 249, 0.1) inset; overflow: hidden; display: flex; flex-direction: column; height: 72vh; max-height: 620px; }
+        .assistant-header { display: flex; align-items: center; justify-content: space-between; padding: 14px 20px; background: rgba(0, 0, 0, 0.3); border-bottom: 1px solid rgba(0, 255, 249, 0.2); }
+        .assistant-header h4 { margin: 0; font-size: 0.95rem; font-weight: 700; letter-spacing: 0.5px; background: linear-gradient(135deg, #fff, var(--neon)); -webkit-background-clip: text; background-clip: text; color: transparent; }
+        .assistant-avatar { font-size: 1.4rem; filter: drop-shadow(0 0 6px var(--neon)); }
+        .chat-messages-glass { flex: 1; overflow-y: auto; padding: 16px; display: flex; flex-direction: column; gap: 10px; scroll-behavior: smooth; }
+        .message-wrapper { display: flex; width: 100%; }
+        .message-wrapper.user { justify-content: flex-end; }
+        .message-wrapper.assistant { justify-content: flex-start; }
+        .message-wrapper.system { justify-content: center; }
+        .message-wrapper.system .message-bubble { background: transparent; font-size: 0.68rem; color: #555; padding: 3px 10px; border-radius: 20px; box-shadow: none; backdrop-filter: none; border: none; font-style: italic; }
+        .message-bubble { max-width: 85%; padding: 10px 14px; border-radius: 22px; font-size: 0.84rem; line-height: 1.45; display: flex; gap: 7px; align-items: flex-start; backdrop-filter: blur(4px); }
+        .message-wrapper.user .message-bubble { background: var(--neon); color: #000; border-bottom-right-radius: 5px; box-shadow: 0 2px 8px rgba(0, 255, 249, 0.3); }
+        .message-wrapper.assistant .message-bubble { background: rgba(255, 255, 255, 0.07); border: 1px solid rgba(255, 255, 255, 0.12); color: #e0e0e0; border-bottom-left-radius: 5px; }
+        .ai-icon { font-size: 1rem; filter: drop-shadow(0 0 4px var(--neon)); flex-shrink: 0; margin-top: 1px; }
+        .message-text { word-break: break-word; white-space: pre-wrap; }
+        .typing-indicator { opacity: 0.6; }
+        /* FIX #4: Input area */
+        .input-area { display: flex; align-items: flex-end; gap: 8px; padding: 12px 16px; background: rgba(0, 0, 0, 0.3); border-top: 1px solid rgba(0, 255, 249, 0.15); width: 100%; box-sizing: border-box; }
+        .glass-input { flex: 1; min-width: 0; background: rgba(255, 255, 255, 0.05); border: 1px solid rgba(0, 255, 249, 0.25); border-radius: 18px; padding: 10px 16px; color: #fff; font-size: 0.82rem; outline: none; transition: border-color 0.2s, box-shadow 0.2s; resize: none; overflow-y: hidden; line-height: 20px; font-family: inherit; min-height: 40px; max-height: 100px; box-sizing: border-box; }
+        .glass-input:focus { border-color: var(--neon); box-shadow: 0 0 10px rgba(0, 255, 249, 0.25); }
+        /* FIX #4: Listening placeholder style */
+        .glass-input.listening-placeholder::placeholder { color: rgba(0, 255, 249, 0.5); }
+        .glass-input.listening-placeholder { border-color: var(--neon); box-shadow: 0 0 10px rgba(0, 255, 249, 0.3); }
+        .glass-input::placeholder { color: rgba(255,255,255,0.25); }
+        /* Google-style minimalist mic — bigger outer glow when listening */
+        .mic-btn { background: transparent; border: none; width: 40px; height: 40px; border-radius: 50%; display: flex; align-items: center; justify-content: center; cursor: pointer; color: rgba(255,255,255,0.45); transition: all 0.2s; flex-shrink: 0; padding: 0; }
+        .mic-btn:hover:not(:disabled) { color: #fff; }
+        .mic-btn:disabled { opacity: 0.3; cursor: not-allowed; }
+        .mic-btn.listening { color: var(--neon); box-shadow: 0 0 0 6px rgba(0,255,249,0.15), 0 0 18px rgba(0,255,249,0.4); border-radius: 50%; animation: pulseMic 1.2s ease-in-out infinite; }
+        @keyframes pulseMic { 0% { box-shadow: 0 0 0 4px rgba(0,255,249,0.1), 0 0 12px rgba(0,255,249,0.3); } 50% { box-shadow: 0 0 0 8px rgba(0,255,249,0.2), 0 0 24px rgba(0,255,249,0.5); } 100% { box-shadow: 0 0 0 4px rgba(0,255,249,0.1), 0 0 12px rgba(0,255,249,0.3); } }
+        .send-btn { background: var(--neon); border: none; width: 40px; height: 40px; border-radius: 50%; font-size: 1rem; font-weight: bold; color: #000; cursor: pointer; transition: all 0.2s; box-shadow: 0 0 8px rgba(0,255,249,0.5); flex-shrink: 0; display: flex; align-items: center; justify-content: center; }
+        .send-btn:disabled { opacity: 0.4; box-shadow: none; cursor: not-allowed; }
+        .send-btn:hover:not(:disabled) { box-shadow: 0 0 14px var(--neon); transform: scale(1.05); }
+        /* FIX #4: Clear chat at bottom */
+        .clear-chat-row { display: flex; justify-content: center; padding: 8px; border-top: 1px solid rgba(255,255,255,0.05); background: rgba(0,0,0,0.2); }
+        .clear-chat-btn { background: none; border: none; color: #444; font-size: 0.7rem; cursor: pointer; letter-spacing: 0.5px; transition: color 0.2s; padding: 4px 10px; border-radius: 20px; }
+        .clear-chat-btn:hover { color: #888; }
+        .chat-messages-glass::-webkit-scrollbar { width: 3px; }
+        .chat-messages-glass::-webkit-scrollbar-track { background: transparent; }
+        .chat-messages-glass::-webkit-scrollbar-thumb { background: rgba(0,255,249,0.3); border-radius: 3px; }
+        /* FIX: Batch confirmation cards stack */
+        .confirmation-cards-stack { display: flex; flex-direction: column; gap: 10px; margin-top: 12px; }
+        .confirmation-card { background: rgba(12, 12, 20, 0.97); border-radius: 22px; padding: 14px 16px; width: 100%; box-sizing: border-box; border: 1px solid rgba(0, 255, 249, 0.4); box-shadow: 0 0 20px rgba(0,255,249,0.15), 0 6px 24px rgba(0,0,0,0.5); backdrop-filter: blur(20px); }
+        .confirmation-header { font-size: 0.68rem; font-weight: 800; color: var(--neon); margin-bottom: 8px; letter-spacing: 1px; text-transform: uppercase; }
+        .confirmation-details { font-size: 0.84rem; color: #ddd; line-height: 1.5; }
+        .confirmation-details p { margin: 2px 0; }
+        .conf-meta { color: #666 !important; font-size: 0.74rem !important; }
+        .confirmation-buttons { display: flex; gap: 10px; margin-top: 12px; }
+        .confirm-yes { flex: 1; padding: 8px; border: none; border-radius: 30px; font-weight: 800; font-size: 0.8rem; cursor: pointer; background: var(--neon); color: #000; box-shadow: 0 0 10px rgba(0,255,249,0.4); transition: all 0.2s; letter-spacing: 0.5px; }
+        .confirm-no { flex: 1; padding: 8px; border: 1px solid rgba(255,68,68,0.4); border-radius: 30px; font-weight: 700; font-size: 0.8rem; cursor: pointer; background: rgba(255,68,68,0.08); color: #f55; transition: all 0.2s; letter-spacing: 0.5px; }
+        .confirm-yes:hover { box-shadow: 0 0 18px var(--neon); transform: scale(1.02); }
+        .confirm-no:hover { background: rgba(255,68,68,0.18); }
       `}</style>
     </div>
   );
